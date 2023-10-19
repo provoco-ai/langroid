@@ -12,8 +12,9 @@ const server = http.createServer(app);
 const io = socketio(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"]
-  }
+    methods: ["GET", "POST"],
+  },
+  allowEIO3: true,
 });
 
 require("dotenv").config();
@@ -24,8 +25,7 @@ const publicDirectoryPath = path.join(__dirname, "../public");
 app.use(cors());
 app.use(express.static(publicDirectoryPath));
 
-io.on("connection", socket => {
-
+io.on("connection", (socket) => {
   socket.on("sendMessage", (message, callback) => {
     io.emit("message", generateMessage(message));
     callback();
@@ -36,9 +36,7 @@ io.on("connection", socket => {
     //callback();
   });
 
-  socket.on("disconnect", () => {
-
-  });
+  socket.on("disconnect", () => {});
 });
 
 server.listen(port, () => {
