@@ -18,7 +18,8 @@ from github.Repository import Repository
 from pydantic import BaseSettings
 
 from langroid.mytypes import DocMetaData, Document
-from langroid.parsing.pdf_parser import get_doc_from_pdf_file
+from langroid.parsing.document_parser import DocumentParser
+from langroid.parsing.parser import Parser, ParsingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,16 @@ def _get_decoded_content(content_file: ContentFile) -> str:
         return content_file.content or ""
     else:
         raise ValueError(f"Unsupported encoding: {content_file.encoding}")
+
+
+def _has_files(directory: str) -> bool:
+    """
+    Recursively checks if there is at least one file in a directory.
+    """
+    for dirpath, dirnames, filenames in os.walk(directory):
+        if filenames:
+            return True
+    return False
 
 
 class RepoLoaderConfig(BaseSettings):
@@ -211,7 +222,11 @@ class RepoLoader:
         with open(self.log_file, "r") as f:
             log: Dict[str, str] = json.load(f)
 
-        if self.url in log and os.path.exists(log[self.url]):
+        if (
+            self.url in log
+            and os.path.exists(log[self.url])
+            and _has_files(log[self.url])
+        ):
             logger.warning(f"Repo Already downloaded in {log[self.url]}")
             self.clone_path = log[self.url]
             return self.clone_path
@@ -325,7 +340,7 @@ class RepoLoader:
               A list of Document objects for each file.
         """
         if path is None:
-            if self.clone_path is None:
+            if self.clone_path is None or not _has_files(self.clone_path):
                 self.clone()
             path = self.clone_path
         if path is None:
@@ -439,6 +454,7 @@ class RepoLoader:
     @staticmethod
     def get_documents(
         path: str,
+        parser: Parser = Parser(ParsingConfig()),
         file_types: Optional[List[str]] = None,
         exclude_dirs: Optional[List[str]] = None,
         depth: int = -1,
@@ -449,6 +465,7 @@ class RepoLoader:
 
         Args:
             path (str): The path to the directory or file.
+            parser (Parser): Parser to use to parse files.
             file_types (List[str], optional): List of file extensions OR
                 filenames OR file_path_names to  include.
                 Defaults to None, which includes all files.
@@ -490,8 +507,12 @@ class RepoLoader:
 
         for file_path in file_paths:
             _, file_extension = os.path.splitext(file_path)
-            if file_extension == ".pdf":
-                docs.append(get_doc_from_pdf_file(file_path))
+            if file_extension.lower() in [".pdf", ".docx"]:
+                doc_parser = DocumentParser.create(
+                    file_path,
+                    parser.config,
+                )
+                docs.extend(doc_parser.get_doc_chunks())
             else:
                 with open(file_path, "r") as f:
                     if lines is not None:

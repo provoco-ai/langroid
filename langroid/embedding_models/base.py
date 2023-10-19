@@ -9,6 +9,7 @@ logging.getLogger("openai").setLevel(logging.ERROR)
 
 class EmbeddingModelsConfig(BaseSettings):
     model_type: str = "openai"
+    dims: int = 0
 
 
 class EmbeddingModel(ABC):
@@ -20,14 +21,17 @@ class EmbeddingModel(ABC):
     def create(cls, config: EmbeddingModelsConfig) -> "EmbeddingModel":
         from langroid.embedding_models.models import (
             OpenAIEmbeddings,
+            OpenAIEmbeddingsConfig,
             SentenceTransformerEmbeddings,
+            SentenceTransformerEmbeddingsConfig,
         )
 
-        emb_class = {
-            "openai": OpenAIEmbeddings,
-            "sentence-transformer": SentenceTransformerEmbeddings,
-        }.get(config.model_type, OpenAIEmbeddings)
-        return emb_class(config)  # type: ignore
+        if isinstance(config, OpenAIEmbeddingsConfig):
+            return OpenAIEmbeddings(config)
+        elif isinstance(config, SentenceTransformerEmbeddingsConfig):
+            return SentenceTransformerEmbeddings(config)
+        else:
+            raise ValueError(f"Unknown embedding config: {config.__repr_name__}")
 
     @abstractmethod
     def embedding_fn(self) -> EmbeddingFunction:

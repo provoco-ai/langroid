@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -9,6 +10,7 @@ from pydantic import BaseModel, BaseSettings
 
 from langroid.cachedb.momento_cachedb import MomentoCacheConfig
 from langroid.cachedb.redis_cachedb import RedisCacheConfig
+from langroid.language_models.config import Llama2FormatterConfig, PromptFormatterConfig
 from langroid.mytypes import Document
 from langroid.parsing.agent_chats import parse_message
 from langroid.parsing.json import top_level_json_field
@@ -20,24 +22,32 @@ from langroid.prompts.templates import (
 from langroid.utils.configuration import settings
 from langroid.utils.output.printing import show_if_debug
 
+logger = logging.getLogger(__name__)
+
 
 class LLMConfig(BaseSettings):
     type: str = "openai"
+    api_base: str | None = None
+    formatter: None | PromptFormatterConfig = Llama2FormatterConfig()
     timeout: int = 20  # timeout for API requests
-    chat_model: Optional[str] = None
-    completion_model: Optional[str] = None
+    chat_model: str = ""
+    completion_model: str = ""
     temperature: float = 0.0
-    context_length: Optional[Dict[str, int]] = None
+    chat_context_length: int = 1024
+    completion_context_length: int = 1024
     max_output_tokens: int = 1024  # generate at most this many tokens
     # if input length + max_output_tokens > context length of model,
     # we will try shortening requested output
     min_output_tokens: int = 64
-    use_chat_for_completion: bool = True  # use chat model for completion?
-    stream: bool = False  # stream output from API?
+    use_completion_for_chat: bool = False  # use completion model for chat?
+    # use chat model for completion? For OpenAI models, this MUST be set to True!
+    use_chat_for_completion: bool = True
+    stream: bool = True  # stream output from API?
     cache_config: None | RedisCacheConfig | MomentoCacheConfig = None
 
     # Dict of model -> (input/prompt cost, output/completion cost)
-    cost_per_1k_tokens: Optional[Dict[str, Tuple[float, float]]] = None
+    chat_cost_per_1k_tokens: Tuple[float, float] = (0.0, 0.0)
+    completion_cost_per_1k_tokens: Tuple[float, float] = (0.0, 0.0)
 
 
 class LLMFunctionCall(BaseModel):
@@ -199,13 +209,23 @@ class LanguageModel(ABC):
         self.config = config
 
     @staticmethod
-    def create(config: Optional[LLMConfig]) -> Optional[Type["LanguageModel"]]:
+    def create(config: Optional[LLMConfig]) -> Optional["LanguageModel"]:
         """
         Create a language model.
         Args:
             config: configuration for language model
         Returns: instance of language model
         """
+        if type(config) is LLMConfig:
+            raise ValueError(
+                """
+                Cannot create a Language Model object from LLMConfig. 
+                Please specify a specific subclass of LLMConfig e.g., 
+                OpenAIGPTConfig. If you are creating a ChatAgent from 
+                a ChatAgentConfig, please specify the `llm` field of this config
+                as a specific subclass of LLMConfig, e.g., OpenAIGPTConfig.
+                """
+            )
         from langroid.language_models.azure_openai import AzureGPT
         from langroid.language_models.openai_gpt import OpenAIGPT
 
@@ -222,6 +242,73 @@ class LanguageModel(ABC):
             openai=openai,
         ).get(config.type, openai)
         return cls(config)  # type: ignore
+
+    @staticmethod
+    def user_assistant_pairs(lst: List[str]) -> List[Tuple[str, str]]:
+        """
+        Given an even-length sequence of strings, split into a sequence of pairs
+
+        Args:
+            lst (List[str]): sequence of strings
+
+        Returns:
+            List[Tuple[str,str]]: sequence of pairs of strings
+        """
+        evens = lst[::2]
+        odds = lst[1::2]
+        return list(zip(evens, odds))
+
+    @staticmethod
+    def get_chat_history_components(
+        messages: List[LLMMessage],
+    ) -> Tuple[str, List[Tuple[str, str]], str]:
+        """
+        From the chat history, extract system prompt, user-assistant turns, and
+        final user msg.
+
+        Args:
+            messages (List[LLMMessage]): List of messages in the chat history
+
+        Returns:
+            Tuple[str, List[Tuple[str,str]], str]:
+                system prompt, user-assistant turns, final user msg
+
+        """
+        # Handle various degenerate cases
+        messages = [m for m in messages]  # copy
+        DUMMY_SYS_PROMPT = "You are a helpful assistant."
+        DUMMY_USER_PROMPT = "Follow the instructions above."
+        if len(messages) == 0 or messages[0].role != Role.SYSTEM:
+            logger.warning("No system msg, creating dummy system prompt")
+            messages.insert(0, LLMMessage(content=DUMMY_SYS_PROMPT, role=Role.SYSTEM))
+        system_prompt = messages[0].content
+
+        # now we have messages = [Sys,...]
+        if len(messages) == 1:
+            logger.warning(
+                "Got only system message in chat history, creating dummy user prompt"
+            )
+            messages.append(LLMMessage(content=DUMMY_USER_PROMPT, role=Role.USER))
+
+        # now we have messages = [Sys, msg, ...]
+
+        if messages[1].role != Role.USER:
+            messages.insert(1, LLMMessage(content=DUMMY_USER_PROMPT, role=Role.USER))
+
+        # now we have messages = [Sys, user, ...]
+        if messages[-1].role != Role.USER:
+            logger.warning(
+                "Last message in chat history is not a user message,"
+                " creating dummy user prompt"
+            )
+            messages.append(LLMMessage(content=DUMMY_USER_PROMPT, role=Role.USER))
+
+        # now we have messages = [Sys, user, ..., user]
+        # so we omit the first and last elements and make pairs of user-asst messages
+        conversation = [m.content for m in messages[1:-1]]
+        user_prompt = messages[-1].content
+        pairs = LanguageModel.user_assistant_pairs(conversation)
+        return system_prompt, pairs, user_prompt
 
     @abstractmethod
     def set_stream(self, stream: bool) -> bool:
@@ -252,29 +339,27 @@ class LanguageModel(ABC):
     ) -> LLMResponse:
         pass
 
+    @abstractmethod
+    async def achat(
+        self,
+        messages: Union[str, List[LLMMessage]],
+        max_tokens: int,
+        functions: Optional[List[LLMFunctionSpec]] = None,
+        function_call: str | Dict[str, str] = "auto",
+    ) -> LLMResponse:
+        pass
+
     def __call__(self, prompt: str, max_tokens: int) -> LLMResponse:
         return self.generate(prompt, max_tokens)
 
     def chat_context_length(self) -> int:
-        if self.config.chat_model is None:
-            raise ValueError("No chat model specified")
-        if self.config.context_length is None:
-            raise ValueError("No context length  specified")
-        return self.config.context_length[self.config.chat_model]
+        return self.config.chat_context_length
 
     def completion_context_length(self) -> int:
-        if self.config.completion_model is None:
-            raise ValueError("No completion model specified")
-        if self.config.context_length is None:
-            raise ValueError("No context length  specified")
-        return self.config.context_length[self.config.completion_model]
+        return self.config.completion_context_length
 
     def chat_cost(self) -> Tuple[float, float]:
-        if self.config.chat_model is None:
-            raise ValueError("No chat model specified")
-        if self.config.cost_per_1k_tokens is None:
-            raise ValueError("No cost per 1k tokens  specified")
-        return self.config.cost_per_1k_tokens[self.config.chat_model]
+        return self.config.chat_cost_per_1k_tokens
 
     def followup_to_standalone(
         self, chat_history: List[Tuple[str, str]], question: str

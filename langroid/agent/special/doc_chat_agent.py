@@ -1,9 +1,16 @@
 """
 Agent that supports asking queries about a set of documents, using
-retrieval-augmented queries.
+retrieval-augmented generation (RAG).
+
 Functionality includes:
 - summarizing a document, with a custom instruction; see `summarize_docs`
 - asking a question about a document; see `answer_from_docs`
+
+Note: to use the sentence-transformer embeddings, you must install
+langroid with the [hf-embeddings] extra, e.g.:
+
+pip install "langroid[hf-embeddings]"
+
 """
 import logging
 from contextlib import ExitStack
@@ -11,6 +18,7 @@ from typing import List, Optional, Tuple, no_type_check
 
 from rich import print
 from rich.console import Console
+from rich.prompt import Prompt
 
 from langroid.agent.base import Agent
 from langroid.agent.chat_agent import ChatAgent, ChatAgentConfig
@@ -19,10 +27,16 @@ from langroid.embedding_models.models import OpenAIEmbeddingsConfig
 from langroid.language_models.base import StreamingIfAllowed
 from langroid.language_models.openai_gpt import OpenAIChatModel, OpenAIGPTConfig
 from langroid.mytypes import DocMetaData, Document, Entity
-from langroid.parsing.parser import ParsingConfig, Splitter
+from langroid.parsing.parser import Parser, ParsingConfig, PdfParsingConfig, Splitter
 from langroid.parsing.repo_loader import RepoLoader
+from langroid.parsing.search import (
+    find_closest_matches_with_bm25,
+    find_fuzzy_matches_in_docs,
+    preprocess_text,
+)
 from langroid.parsing.url_loader import URLLoader
-from langroid.parsing.urls import get_urls_and_paths
+from langroid.parsing.urls import get_list_from_user, get_urls_and_paths
+from langroid.parsing.utils import batched
 from langroid.prompts.prompts_config import PromptsConfig
 from langroid.prompts.templates import SUMMARY_ANSWER_PROMPT_GPT4
 from langroid.utils.configuration import settings
@@ -64,6 +78,21 @@ class DocChatAgentConfig(ChatAgentConfig):
     summarize_prompt: str = SUMMARY_ANSWER_PROMPT_GPT4
     max_context_tokens: int = 1000
     conversation_mode: bool = True
+    # In assistant mode, DocChatAgent receives questions from another Agent,
+    # and those will already be in stand-alone form, so in this mode
+    # there is no need to convert them to stand-alone form.
+    assistant_mode: bool = False
+    # Use LLM to generate hypothetical answer A to the query Q,
+    # and use the embed(A) to find similar chunks in vecdb.
+    # Referred to as HyDE in the paper:
+    # https://arxiv.org/pdf/2212.10496.pdf
+    # It is False by default; its benefits depends on the context.
+    hypothetical_answer: bool = False
+    n_query_rephrases: int = 0
+    use_fuzzy_match: bool = True
+    use_bm25_search: bool = True
+    cross_encoder_reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    embed_batch_size: int = 500  # get embedding of at most this many at a time
     cache: bool = True  # cache results
     debug: bool = False
     stream: bool = True  # allow streaming where needed
@@ -79,28 +108,45 @@ class DocChatAgentConfig(ChatAgentConfig):
     ]
     parsing: ParsingConfig = ParsingConfig(  # modify as needed
         splitter=Splitter.TOKENS,
-        chunk_size=100,  # aim for this many tokens per chunk
+        chunk_size=1000,  # aim for this many tokens per chunk
+        overlap=100,  # overlap between chunks
         max_chunks=10_000,
         # aim to have at least this many chars per chunk when
         # truncating due to punctuation
-        min_chunk_chars=350,
+        min_chunk_chars=200,
         discard_chunk_chars=5,  # discard chunks with fewer than this many chars
-        n_similar_docs=4,
+        n_similar_docs=3,
+        pdf=PdfParsingConfig(
+            # NOTE: PDF parsing is extremely challenging, and each library
+            # has its own strengths and weaknesses.
+            # Try one that works for your use case.
+            # or "haystack", "unstructured", "pdfplumber", "fitz", "pypdf"
+            library="pdfplumber",
+        ),
     )
+    from langroid.embedding_models.models import SentenceTransformerEmbeddingsConfig
+
+    hf_embed_config = SentenceTransformerEmbeddingsConfig(
+        model_type="sentence-transformer",
+        model_name="BAAI/bge-large-en-v1.5",
+    )
+
+    oai_embed_config = OpenAIEmbeddingsConfig(
+        model_type="openai",
+        model_name="text-embedding-ada-002",
+        dims=1536,
+    )
+
     vecdb: VectorStoreConfig = QdrantDBConfig(
-        type="qdrant",
         collection_name=None,
         storage_path=".qdrant/data/",
-        embedding=OpenAIEmbeddingsConfig(
-            model_type="openai",
-            model_name="text-embedding-ada-002",
-            dims=1536,
-        ),
+        embedding=hf_embed_config,
     )
     llm: OpenAIGPTConfig = OpenAIGPTConfig(
         type="openai",
         chat_model=OpenAIChatModel.GPT4,
         completion_model=OpenAIChatModel.GPT4,
+        timeout=40,
     )
     prompts: PromptsConfig = PromptsConfig(
         max_tokens=1000,
@@ -120,6 +166,8 @@ class DocChatAgent(ChatAgent):
         self.config: DocChatAgentConfig = config
         self.original_docs: None | List[Document] = None
         self.original_docs_length = 0
+        self.chunked_docs: None | List[Document] = None
+        self.chunked_docs_clean: None | List[Document] = None
         self.response: None | Document = None
         if len(config.doc_paths) > 0:
             self.ingest()
@@ -135,15 +183,26 @@ class DocChatAgent(ChatAgent):
                 paths: list of file paths
         """
         if len(self.config.doc_paths) == 0:
+            # we must be using a previously defined collection
+            # But let's get all the chunked docs so we can
+            # do keyword and other non-vector searches
+            if self.vecdb is None:
+                raise ValueError("VecDB not set")
+            self.chunked_docs = self.vecdb.get_all_documents()
+            self.chunked_docs_clean = [
+                Document(content=preprocess_text(d.content), metadata=d.metadata)
+                for d in self.chunked_docs
+            ]
             return
         urls, paths = get_urls_and_paths(self.config.doc_paths)
         docs: List[Document] = []
+        parser = Parser(self.config.parsing)
         if len(urls) > 0:
-            loader = URLLoader(urls=urls)
+            loader = URLLoader(urls=urls, parser=parser)
             docs = loader.load()
         if len(paths) > 0:
             for p in paths:
-                path_docs = RepoLoader.get_documents(p)
+                path_docs = RepoLoader.get_documents(p, parser=parser)
                 docs.extend(path_docs)
         n_docs = len(docs)
         n_splits = self.ingest_docs(docs)
@@ -168,9 +227,17 @@ class DocChatAgent(ChatAgent):
         if self.parser is None:
             raise ValueError("Parser not set")
         docs = self.parser.split(docs)
+        self.chunked_docs = docs
+        self.chunked_docs_clean = [
+            Document(content=preprocess_text(d.content), metadata=d.metadata)
+            for d in self.chunked_docs
+        ]
         if self.vecdb is None:
             raise ValueError("VecDB not set")
-        self.vecdb.add_documents(docs)
+        # add embeddings in batches, to stay under limit of embeddings API
+        batches = list(batched(docs, self.config.embed_batch_size))
+        for batch in batches:
+            self.vecdb.add_documents(batch)
         self.original_docs_length = self.doc_length(docs)
         return len(docs)
 
@@ -185,6 +252,78 @@ class DocChatAgent(ChatAgent):
         if self.parser is None:
             raise ValueError("Parser not set")
         return self.parser.num_tokens(self.doc_string(docs))
+
+    def user_docs_ingest_dialog(self) -> None:
+        """
+        Ask user to select doc-collection, enter filenames/urls, and ingest into vecdb.
+        """
+        if self.vecdb is None:
+            raise ValueError("VecDB not set")
+        n_deletes = self.vecdb.clear_empty_collections()
+        collections = self.vecdb.list_collections()
+        collection_name = "NEW"
+        is_new_collection = False
+        replace_collection = False
+        if len(collections) > 0:
+            n = len(collections)
+            delete_str = (
+                f"(deleted {n_deletes} empty collections)" if n_deletes > 0 else ""
+            )
+            print(f"Found {n} collections: {delete_str}")
+            for i, option in enumerate(collections, start=1):
+                print(f"{i}. {option}")
+            while True:
+                choice = Prompt.ask(
+                    f"Enter 1-{n} to select a collection, "
+                    "or hit ENTER to create a NEW collection, "
+                    "or -1 to DELETE ALL COLLECTIONS",
+                    default="0",
+                )
+                try:
+                    if -1 <= int(choice) <= n:
+                        break
+                except Exception:
+                    pass
+
+            if choice == "-1":
+                confirm = Prompt.ask(
+                    "Are you sure you want to delete all collections?",
+                    choices=["y", "n"],
+                    default="n",
+                )
+                if confirm == "y":
+                    self.vecdb.clear_all_collections(really=True)
+                    collection_name = "NEW"
+
+            if int(choice) > 0:
+                collection_name = collections[int(choice) - 1]
+                print(f"Using collection {collection_name}")
+                choice = Prompt.ask(
+                    "Would you like to replace this collection?",
+                    choices=["y", "n"],
+                    default="n",
+                )
+                replace_collection = choice == "y"
+
+        if collection_name == "NEW":
+            is_new_collection = True
+            collection_name = Prompt.ask(
+                "What would you like to name the NEW collection?",
+                default="doc-chat-2",
+            )
+
+        self.vecdb.set_collection(collection_name, replace=replace_collection)
+
+        default_urls_str = (
+            " (or leave empty for default URLs)" if is_new_collection else ""
+        )
+        print(f"[blue]Enter some URLs or file/dir paths below {default_urls_str}")
+        inputs = get_list_from_user()
+        if len(inputs) == 0:
+            if is_new_collection:
+                inputs = self.config.default_paths
+        self.config.doc_paths = inputs
+        self.ingest()
 
     @no_type_check
     def llm_response(
@@ -303,24 +442,199 @@ class DocChatAgent(ChatAgent):
             ),
         )
 
+    def llm_hypothetical_answer(self, query: str) -> str:
+        if self.llm is None:
+            raise ValueError("LLM not set")
+        with console.status("[cyan]LLM generating hypothetical answer..."):
+            with StreamingIfAllowed(self.llm, False):
+                # TODO: provide an easy way to
+                # Adjust this prompt depending on context.
+                answer = self.llm_response_forget(
+                    f"""
+                    Give an ideal answer to the following query, 
+                    in up to 3 sentences. Do not explain yourself, 
+                    and do not apologize, just show 
+                    a good possible answer, even if you do not have any information.
+                    Preface your answer with "HYPOTHETICAL ANSWER: "
+                    
+                    QUERY: {query}
+                    """
+                ).content
+        return answer
+
+    def llm_rephrase_query(self, query: str) -> List[str]:
+        if self.llm is None:
+            raise ValueError("LLM not set")
+        with console.status("[cyan]LLM generating rephrases of query..."):
+            with StreamingIfAllowed(self.llm, False):
+                rephrases = self.llm_response_forget(
+                    f"""
+                        Rephrase the following query in {self.config.n_query_rephrases}
+                        different equivalent ways, separate them with 2 newlines.
+                        QUERY: {query}
+                        """
+                ).content.split("\n\n")
+        return rephrases
+
+    def get_similar_chunks_bm25(
+        self, query: str, multiple: int
+    ) -> List[Tuple[Document, float]]:
+        # find similar docs using bm25 similarity:
+        # these may sometimes be more likely to contain a relevant verbatim extract
+        with console.status("[cyan]Searching for similar chunks using bm25..."):
+            if self.chunked_docs is None:
+                logger.warning("No chunked docs; cannot use bm25-similarity")
+                return []
+            if self.chunked_docs_clean is None:
+                logger.warning("No cleaned chunked docs; cannot use bm25-similarity")
+                return []
+            docs_scores = find_closest_matches_with_bm25(
+                self.chunked_docs,
+                self.chunked_docs_clean,  # already pre-processed!
+                query,
+                k=self.config.parsing.n_similar_docs * multiple,
+            )
+        return docs_scores
+
+    def get_fuzzy_matches(self, query: str, multiple: int) -> List[Document]:
+        # find similar docs using fuzzy matching:
+        # these may sometimes be more likely to contain a relevant verbatim extract
+        with console.status("[cyan]Finding fuzzy matches in chunks..."):
+            if self.chunked_docs is None:
+                logger.warning("No chunked docs; cannot use fuzzy matching")
+                return []
+            fuzzy_match_docs = find_fuzzy_matches_in_docs(
+                query,
+                self.chunked_docs,
+                k=self.config.parsing.n_similar_docs * multiple,
+                words_before=1000,
+                words_after=1000,
+            )
+        return fuzzy_match_docs
+
+    def rerank_with_cross_encoder(
+        self, query: str, passages: List[Document]
+    ) -> List[Document]:
+        with console.status("[cyan]Re-ranking retrieved chunks using cross-encoder..."):
+            try:
+                from sentence_transformers import CrossEncoder
+            except ImportError:
+                raise ImportError(
+                    """
+                    To use cross-encoder re-ranking, you must install
+                    langroid with the [hf-embeddings] extra, e.g.:
+                    pip install "langroid[hf-embeddings]"
+                    """
+                )
+
+            model = CrossEncoder(self.config.cross_encoder_reranking_model)
+            scores = model.predict([(query, p.content) for p in passages])
+            # get top k scoring passages
+            sorted_pairs = sorted(
+                zip(scores, passages),
+                key=lambda x: x[0],
+                reverse=True,
+            )
+            passages = [
+                d for _, d in sorted_pairs[: self.config.parsing.n_similar_docs]
+            ]
+        return passages
+
+    def get_relevant_chunks(
+        self, query: str, query_proxies: List[str] = []
+    ) -> List[Document]:
+        """
+        The retrieval stage in RAG: get doc-chunks that are most "relevant"
+        to the query (and possibly any proxy queries), from the document-store,
+        which currently is the vector store,
+        but in theory could be any document store, or even web-search.
+        This stage does NOT involve an LLM, and the retrieved chunks
+        could either be pre-chunked text (from the initial pre-processing stage
+        where chunks were stored in the vector store), or they could be
+        dynamically retrieved based on a window around a lexical match.
+
+        These are the steps (some optional based on config):
+        - vector-embedding distance, from vecdb
+        - bm25-ranking (keyword similarity)
+        - fuzzy matching (keyword similarity)
+        - re-ranking of doc-chunks using cross-encoder, pick top k
+
+        Args:
+            query: original query (assumed to be in stand-alone form)
+            query_proxies: possible rephrases, or hypothetical answer to query
+                    (e.g. for HyDE-type retrieval)
+
+        Returns:
+
+        """
+        # if we are using cross-encoder reranking, we can retrieve more docs
+        # during retrieval, and leave it to the cross-encoder re-ranking
+        # to whittle down to self.config.parsing.n_similar_docs
+        retrieval_multiple = 1 if self.config.cross_encoder_reranking_model == "" else 3
+
+        if self.vecdb is None:
+            raise ValueError("VecDB not set")
+
+        with console.status("[cyan]Searching VecDB for relevant doc passages..."):
+            docs_and_scores: List[Tuple[Document, float]] = []
+            for q in [query] + query_proxies:
+                docs_and_scores += self.vecdb.similar_texts_with_scores(
+                    q,
+                    k=self.config.parsing.n_similar_docs * retrieval_multiple,
+                )
+        # keep only docs with unique d.id()
+        id2doc_score = {d.id(): (d, s) for d, s in docs_and_scores}
+        docs_and_scores = list(id2doc_score.values())
+
+        passages = [
+            Document(content=d.content, metadata=d.metadata)
+            for (d, _) in docs_and_scores
+        ]
+
+        if self.config.use_bm25_search:
+            docs_scores = self.get_similar_chunks_bm25(query, retrieval_multiple)
+            passages += [d for (d, _) in docs_scores]
+
+        if self.config.use_fuzzy_match:
+            fuzzy_match_docs = self.get_fuzzy_matches(query, retrieval_multiple)
+            passages += fuzzy_match_docs
+
+        # keep unique passages
+        id2passage = {p.id(): p for p in passages}
+        passages = list(id2passage.values())
+
+        if len(passages) == 0:
+            return []
+
+        # now passages can potentially have a lot of doc chunks,
+        # so we re-rank them using a cross-encoder scoring model
+        # https://www.sbert.net/examples/applications/retrieve_rerank
+        if self.config.cross_encoder_reranking_model != "":
+            passages = self.rerank_with_cross_encoder(query, passages)
+
+        return passages
+
     @no_type_check
     def get_relevant_extracts(self, query: str) -> Tuple[str, List[Document]]:
         """
-        Get list of docs or extracts relevant to a query. These could be:
-        - the original docs, if they exist and are not too long, or
-        - a list of doc-chunks retrieved from the VecDB
-            that are "relevant" to the query, if these are not too long, or
-        - a list of relevant extracts from these doc-chunks
+        Get list of (verbatim) extracts from doc-chunks relevant to answering a query.
+
+        These are the stages (some optional based on config):
+        - use LLM to convert query to stand-alone query
+        - optionally use LLM to rephrase query to use below
+        - optionally use LLM to generate hypothetical answer (HyDE) to use below.
+        - get_relevant_chunks(): get doc-chunks relevant to query and proxies
+        - use LLM to get relevant extracts from doc-chunks
 
         Args:
             query (str): query to search for
 
         Returns:
             query (str): stand-alone version of input query
-            List[Document]: list of relevant docs
+            List[Document]: list of relevant extracts
 
         """
-        if len(self.dialog) > 0:
+        if len(self.dialog) > 0 and not self.config.assistant_mode:
             # Regardless of whether we are in conversation mode or not,
             # for relevant doc/chunk extraction, we must convert the query
             # to a standalone query to get more relevant results.
@@ -329,27 +643,23 @@ class DocChatAgent(ChatAgent):
                     query = self.llm.followup_to_standalone(self.dialog, query)
             print(f"[orange2]New query: {query}")
 
-        passages = self.original_docs
+        proxies = []
+        if self.config.hypothetical_answer:
+            answer = self.llm_hypothetical_answer(query)
+            proxies = [answer]
 
-        # if original docs not too long, no need to look for relevant parts.
-        if (
-            passages is None
-            or self.original_docs_length > self.config.max_context_tokens
-        ):
-            with console.status("[cyan]Searching VecDB for relevant doc passages..."):
-                docs_and_scores = self.vecdb.similar_texts_with_scores(
-                    query,
-                    k=self.config.parsing.n_similar_docs,
-                )
-            if len(docs_and_scores) == 0:
-                return query, []
-            passages = [
-                Document(content=d.content, metadata=d.metadata)
-                for (d, _) in docs_and_scores
-            ]
+        if self.config.n_query_rephrases > 0:
+            rephrases = self.llm_rephrase_query(query)
+            proxies += rephrases
+
+        passages = self.get_relevant_chunks(query, proxies)  # no LLM involved
+
+        if len(passages) == 0:
+            return query, []
 
         with console.status("[cyan]LLM Extracting verbatim passages..."):
             with StreamingIfAllowed(self.llm, False):
+                # these are async calls, one per passage; turn off streaming
                 extracts = self.llm.get_verbatim_extracts(query, passages)
                 extracts = [e for e in extracts if e.content != NO_ANSWER]
 
@@ -395,6 +705,8 @@ class DocChatAgent(ChatAgent):
         instruction: str = "Give a concise summary of the following text:",
     ) -> None | ChatDocument:
         """Summarize all docs"""
+        if self.llm is None:
+            raise ValueError("LLM not set")
         if self.original_docs is None:
             logger.warning(
                 """
@@ -409,13 +721,8 @@ class DocChatAgent(ChatAgent):
         if self.parser is None:
             raise ValueError("No parser defined")
         tot_tokens = self.parser.num_tokens(full_text)
-        model = (
-            self.config.llm.chat_model
-            if self.config.llm.use_chat_for_completion
-            else self.config.llm.completion_model
-        )
         MAX_INPUT_TOKENS = (
-            self.config.llm.context_length[model]
+            self.llm.completion_context_length()
             - self.config.llm.max_output_tokens
             - 100
         )
@@ -431,7 +738,7 @@ class DocChatAgent(ChatAgent):
         {instruction}
         {full_text}
         """.strip()
-        with StreamingIfAllowed(self.llm):  # type: ignore
+        with StreamingIfAllowed(self.llm):
             summary = Agent.llm_response(self, prompt)
             return summary  # type: ignore
 

@@ -1,11 +1,12 @@
 import inspect
 import json
 import logging
-import textwrap
 from abc import ABC
 from contextlib import ExitStack
 from typing import (
+    Any,
     Callable,
+    Coroutine,
     Dict,
     List,
     Optional,
@@ -22,7 +23,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 
 from langroid.agent.chat_document import ChatDocMetaData, ChatDocument
-from langroid.agent.tool_message import INSTRUCTION, ToolMessage
+from langroid.agent.tool_message import ToolMessage
 from langroid.io.base import IOFactory
 from langroid.language_models.base import (
     LanguageModel,
@@ -30,7 +31,9 @@ from langroid.language_models.base import (
     LLMMessage,
     LLMResponse,
     LLMTokenUsage,
+    StreamingIfAllowed,
 )
+from langroid.language_models.openai_gpt import OpenAIGPTConfig
 from langroid.mytypes import DocMetaData, Entity
 from langroid.parsing.json import extract_top_level_json
 from langroid.parsing.parser import Parser, ParsingConfig
@@ -52,10 +55,11 @@ class AgentConfig(BaseSettings):
 
     name: str = "LLM-Agent"
     debug: bool = False
-    vecdb: Optional[VectorStoreConfig] = VectorStoreConfig()
-    llm: Optional[LLMConfig] = LLMConfig()
+    vecdb: Optional[VectorStoreConfig] = None
+    llm: Optional[LLMConfig] = OpenAIGPTConfig()
     parsing: Optional[ParsingConfig] = ParsingConfig()
     prompts: Optional[PromptsConfig] = PromptsConfig()
+    show_stats: bool = True  # show token usage/cost stats?
 
 
 class Agent(ABC):
@@ -77,6 +81,7 @@ class Agent(ABC):
         self.llm_tools_usable: Set[str] = set()
         self.total_llm_token_cost = 0.0
         self.total_llm_token_usage = 0
+        self.token_stats_str = ""
         self.default_human_response: Optional[str] = None
         self._indent = ""
         self.llm = LanguageModel.create(config.llm)
@@ -103,6 +108,25 @@ class Agent(ABC):
             (Entity.AGENT, self.agent_response),
             (Entity.LLM, self.llm_response),
             (Entity.USER, self.user_response),
+        ]
+
+    def entity_responders_async(
+        self,
+    ) -> List[
+        Tuple[
+            Entity,
+            Callable[
+                [None | str | ChatDocument], Coroutine[Any, Any, None | ChatDocument]
+            ],
+        ]
+    ]:
+        """
+        Async version of `entity_responders`. See there for details.
+        """
+        return [
+            (Entity.AGENT, self.agent_response_async),
+            (Entity.LLM, self.llm_response_async),
+            (Entity.USER, self.user_response_async),
         ]
 
     @property
@@ -212,29 +236,6 @@ class Agent(ABC):
         for t in self._get_tool_list(message_class):
             self.llm_tools_handled.discard(t)
 
-    def json_format_rules(self) -> str:
-        """
-        Specification of JSON formatting rules, based on the currently enabled
-        message classes.
-
-        Returns:
-            str: formatting rules
-        """
-        enabled_classes: List[Type[ToolMessage]] = list(self.llm_tools_map.values())
-        if len(enabled_classes) == 0:
-            return "You can ask questions in natural language."
-
-        json_conditions = "\n\n".join(
-            [
-                str(msg_cls.default_value("request"))
-                + ":\n"
-                + str(msg_cls.default_value("purpose"))
-                for i, msg_cls in enumerate(enabled_classes)
-                if msg_cls.default_value("request") in self.llm_tools_usable
-            ]
-        )
-        return json_conditions
-
     def sample_multi_round_dialog(self) -> str:
         """
         Generate a sample multi-round dialog based on enabled message classes.
@@ -250,25 +251,11 @@ class Agent(ABC):
         ]
         return "\n\n".join(sample_convo)
 
-    def json_tool_format_instructions(self) -> str:
-        """
-        Generate a string containing instructions to the LLM on when to format
-        requests/questions as JSON, based on the currently enabled message classes.
-
-        Returns:
-            str: The instructions string.
-        """
-        format_rules = self.json_format_rules()
-
-        return f"""
-        You have access to the following TOOLS to accomplish your task:
-        TOOLS AVAILABLE:
-        {format_rules}
-        
-        {INSTRUCTION}
-        
-        Now start, and be concise!                 
-        """
+    async def agent_response_async(
+        self,
+        msg: Optional[str | ChatDocument] = None,
+    ) -> Optional[ChatDocument]:
+        return self.agent_response(msg)
 
     def agent_response(
         self,
@@ -311,6 +298,12 @@ class Agent(ABC):
             ),
         )
 
+    async def user_response_async(
+        self,
+        msg: Optional[str | ChatDocument] = None,
+    ) -> Optional[ChatDocument]:
+        return self.user_response(msg)
+
     def user_response(
         self,
         msg: Optional[str | ChatDocument] = None,
@@ -342,11 +335,18 @@ class Agent(ABC):
         if not user_msg:
             return None
         else:
+            if user_msg.startswith("SYSTEM"):
+                user_msg = user_msg[6:].strip()
+                source = Entity.SYSTEM
+                sender = Entity.SYSTEM
+            else:
+                source = Entity.USER
+                sender = Entity.USER
             return ChatDocument(
                 content=user_msg,
                 metadata=DocMetaData(
-                    source=Entity.USER,
-                    sender=Entity.USER,
+                    source=source,
+                    sender=sender,
                 ),
             )
 
@@ -376,6 +376,58 @@ class Agent(ABC):
             return False
 
         return True
+
+    @no_type_check
+    async def llm_response_async(
+        self,
+        msg: Optional[str | ChatDocument] = None,
+    ) -> Optional[ChatDocument]:
+        """
+        Asynch version of `llm_response`. See there for details.
+        """
+        if msg is None or not self.llm_can_respond(msg):
+            return None
+
+        if isinstance(msg, ChatDocument):
+            prompt = msg.content
+        else:
+            prompt = msg
+
+        output_len = self.config.llm.max_output_tokens
+        if self.num_tokens(prompt) + output_len > self.llm.completion_context_length():
+            output_len = self.llm.completion_context_length() - self.num_tokens(prompt)
+            if output_len < self.config.llm.min_output_tokens:
+                raise ValueError(
+                    """
+                Token-length of Prompt + Output is longer than the
+                completion context length of the LLM!
+                """
+                )
+            else:
+                logger.warning(
+                    f"""
+                Requested output length has been shortened to {output_len}
+                so that the total length of Prompt + Output is less than
+                the completion context length of the LLM. 
+                """
+                )
+
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):
+            response = await self.llm.agenerate(prompt, output_len)
+
+        if not self.llm.get_stream() or response.cached:
+            # We would have already displayed the msg "live" ONLY if
+            # streaming was enabled, AND we did not find a cached response.
+            # If we are here, it means the response has not yet been displayed.
+            cached = f"[red]{self.indent}(cached)[/red]" if response.cached else ""
+            print(cached + "[green]" + response.message)
+        self.update_token_usage(
+            response,
+            prompt,
+            self.llm.get_stream(),
+            print_response_stats=self.config.show_stats,
+        )
+        return ChatDocument.from_LLMResponse(response, displayed=True)
 
     @no_type_check
     def llm_response(
@@ -421,7 +473,7 @@ class Agent(ABC):
                 else:
                     logger.warning(
                         f"""
-                    Requested output length has been shorted to {output_len}
+                    Requested output length has been shortened to {output_len}
                     so that the total length of Prompt + Output is less than
                     the completion context length of the LLM. 
                     """
@@ -430,15 +482,19 @@ class Agent(ABC):
                 self.io_output(f"[green]{self.indent}")
             response = self.llm.generate(prompt, output_len)
 
-        displayed = False
         if not self.llm.get_stream() or response.cached:
             # we would have already displayed the msg "live" ONLY if
             # streaming was enabled, AND we did not find a cached response
-            self.io_output(f"[green]{self.indent}")
-            self.io_output(f"[green]{response.message}")
+            self.io_output(f"[green]{self.indent}", end="")
+            self.io_output("[green]" + response.message)
             displayed = True
-        self.update_token_usage(response, prompt, self.llm.get_stream())
-        return ChatDocument.from_LLMResponse(response, displayed)
+        self.update_token_usage(
+            response,
+            prompt,
+            self.llm.get_stream(),
+            print_response_stats=self.config.show_stats,
+        )
+        return ChatDocument.from_LLMResponse(response, displayed=displayed)
 
     def get_tool_messages(self, msg: str | ChatDocument) -> List[ToolMessage]:
         if isinstance(msg, str):
@@ -622,8 +678,43 @@ class Agent(ABC):
         else:
             return sum([self.parser.num_tokens(m.content) for m in prompt])
 
+    def _get_response_stats(
+        self, chat_length: int, tot_cost: float, response: LLMResponse
+    ) -> str:
+        """
+        Get LLM response stats as a string
+
+        Args:
+            chat_length (int): number of messages in the chat
+            tot_cost (float): total cost of the chat so far
+            response (LLMResponse): LLMResponse object
+        """
+
+        if self.config.llm is None:
+            logger.warning("LLM config is None, cannot get response stats")
+            return ""
+        if response.usage:
+            in_tokens = response.usage.prompt_tokens
+            out_tokens = response.usage.completion_tokens
+            llm_response_cost = format(response.usage.cost, ".4f")
+            cumul_cost = format(tot_cost, ".4f")
+            assert isinstance(self.llm, LanguageModel)
+            context_length = self.llm.chat_context_length()
+            max_out = self.config.llm.max_output_tokens
+            return (
+                f"[bold]Stats:[/bold] [magenta] N_MSG={chat_length}, "
+                f"TOKENS: in={in_tokens}, out={out_tokens}, "
+                f"max={max_out}, ctx={context_length}, "
+                f"COST: now=${llm_response_cost}, cumul=${cumul_cost}[/magenta]"
+            )
+        return ""
+
     def update_token_usage(
-        self, response: LLMResponse, prompt: str | List[LLMMessage], stream: bool
+        self,
+        response: LLMResponse,
+        prompt: str | List[LLMMessage],
+        stream: bool,
+        print_response_stats: bool = True,
     ) -> None:
         """
         Updates `response.usage` obj (token usage and cost fields).the usage memebr
@@ -656,20 +747,16 @@ class Agent(ABC):
                     cost=cost,
                 )
 
-            if settings.debug and response.usage is not None:
-                print(
-                    textwrap.dedent(
-                        f"""
-                        Stream: {stream}
-                        prompt_tokens: {response.usage.prompt_tokens}
-                        completion_tokens: {response.usage.completion_tokens}
-                        """.lstrip()
-                    )
-                )
             # update total counters
             if response.usage is not None:
                 self.total_llm_token_cost += response.usage.cost
                 self.total_llm_token_usage += response.usage.total_tokens
+                chat_length = 1 if isinstance(prompt, str) else len(prompt)
+                self.token_stats_str = self._get_response_stats(
+                    chat_length, self.total_llm_token_cost, response
+                )
+                if print_response_stats:
+                    print(self.indent + self.token_stats_str)
 
     def compute_token_cost(self, prompt: int, completion: int) -> float:
         price = cast(LanguageModel, self.llm).chat_cost()

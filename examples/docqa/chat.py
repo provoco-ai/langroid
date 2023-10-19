@@ -6,72 +6,29 @@ import re
 import typer
 from rich import print
 from rich.prompt import Prompt
+import os
 
 from langroid.agent.special.doc_chat_agent import (
     DocChatAgent,
     DocChatAgentConfig,
 )
+from langroid.parsing.parser import ParsingConfig, PdfParsingConfig, Splitter
 from langroid.agent.task import Task
-from langroid.parsing.urls import get_list_from_user
 from langroid.utils.configuration import set_global, Settings
 from langroid.utils.logging import setup_colored_logging
 
 app = typer.Typer()
 
 setup_colored_logging()
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def chat(config: DocChatAgentConfig) -> None:
     agent = DocChatAgent(config)
-    n_deletes = agent.vecdb.clear_empty_collections()
-    collections = agent.vecdb.list_collections()
-    collection_name = "NEW"
-    is_new_collection = False
-    replace_collection = False
-    if len(collections) > 1:
-        n = len(collections)
-        delete_str = f"(deleted {n_deletes} empty collections)" if n_deletes > 0 else ""
-        print(f"Found {n} collections: {delete_str}")
-        for i, option in enumerate(collections, start=1):
-            print(f"{i}. {option}")
-        while True:
-            choice = Prompt.ask(
-                f"Enter a number in the range [1, {n}] to select a collection, "
-                "or hit enter to create a NEW collection",
-                default="0",
-            )
-            if choice.isdigit() and 0 <= int(choice) <= n:
-                break
-
-        if int(choice) > 0:
-            collection_name = collections[int(choice) - 1]
-            print(f"Using collection {collection_name}")
-            choice = Prompt.ask(
-                "Would you like to replace this collection?",
-                choices=["y", "n"],
-                default="n",
-            )
-            replace_collection = choice == "y"
-
-    if collection_name == "NEW":
-        is_new_collection = True
-        collection_name = Prompt.ask(
-            "What would you like to name the NEW collection?",
-            default="urlqa-chat",
-        )
-
-    agent.vecdb.set_collection(collection_name, replace=replace_collection)
-
     print("[blue]Welcome to the document chatbot!")
+    agent.user_docs_ingest_dialog()
     print("[cyan]Enter x or q to quit, or ? for evidence")
-    default_urls_str = " (or leave empty for default URLs)" if is_new_collection else ""
-    print(f"[blue]Enter some URLs or file/dir paths below {default_urls_str}")
-    inputs = get_list_from_user()
-    if len(inputs) == 0:
-        if is_new_collection:
-            inputs = config.default_paths
-    agent.config.doc_paths = inputs
-    agent.ingest()
+
     system_msg = Prompt.ask(
         """
     [blue] Tell me who I am; complete this sentence: You are...
@@ -98,7 +55,29 @@ def main(
         "redis", "--cachetype", "-ct", help="redis or momento"
     ),
 ) -> None:
-    config = DocChatAgentConfig()
+    config = DocChatAgentConfig(
+        n_query_rephrases=0,
+        cross_encoder_reranking_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        hypothetical_answer=False,
+        parsing=ParsingConfig(  # modify as needed
+            splitter=Splitter.TOKENS,
+            chunk_size=1000,  # aim for this many tokens per chunk
+            overlap=100,  # overlap between chunks
+            max_chunks=10_000,
+            # aim to have at least this many chars per chunk when
+            # truncating due to punctuation
+            min_chunk_chars=200,
+            discard_chunk_chars=5,  # discard chunks with fewer than this many chars
+            n_similar_docs=3,
+            # NOTE: PDF parsing is extremely challenging, each library has its own
+            # strengths and weaknesses. Try one that works for your use case.
+            pdf=PdfParsingConfig(
+                # alternatives: "haystack", "unstructured", "pdfplumber", "fitz"
+                library="pdfplumber",
+            ),
+        ),
+    )
+
     set_global(
         Settings(
             debug=debug,

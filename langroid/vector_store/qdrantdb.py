@@ -28,9 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class QdrantDBConfig(VectorStoreConfig):
-    type: str = "qdrant"
     cloud: bool = True
-
     collection_name: str | None = None
     storage_path: str = ".qdrant/data"
     embedding: EmbeddingModelsConfig = OpenAIEmbeddingsConfig()
@@ -100,21 +98,43 @@ class QdrantDB(VectorStore):
                 self.client.delete_collection(collection_name=name)
         return n_deletes
 
-    def _list_all_collections(self) -> List[str]:
-        """
-        List all collections, including empty ones.
-        Returns:
-            List of collection names.
-        """
-        colls = list(self.client.get_collections())[0][1]
-        return [coll.name for coll in colls]
+    def clear_all_collections(self, really: bool = False, prefix: str = "") -> int:
+        """Clear all collections with the given prefix."""
+        if not really:
+            logger.warning("Not deleting all collections, set really=True to confirm")
+            return 0
+        coll_names = [
+            c for c in self.list_collections(empty=True) if c.startswith(prefix)
+        ]
+        if len(coll_names) == 0:
+            logger.warning(f"No collections found with prefix {prefix}")
+            return 0
+        n_empty_deletes = 0
+        n_non_empty_deletes = 0
+        for name in coll_names:
+            info = self.client.get_collection(collection_name=name)
+            n_empty_deletes += info.points_count == 0
+            n_non_empty_deletes += info.points_count > 0
+            self.client.delete_collection(collection_name=name)
+        logger.warning(
+            f"""
+            Deleted {n_empty_deletes} empty collections and 
+            {n_non_empty_deletes} non-empty collections.
+            """
+        )
+        return n_empty_deletes + n_non_empty_deletes
 
-    def list_collections(self) -> List[str]:
+    def list_collections(self, empty: bool = False) -> List[str]:
         """
         Returns:
             List of collection names that have at least one vector.
+
+        Args:
+            empty (bool, optional): Whether to include empty collections.
         """
         colls = list(self.client.get_collections())[0][1]
+        if empty:
+            return [coll.name for coll in colls]
         counts = [
             self.client.get_collection(collection_name=coll.name).points_count
             for coll in colls
@@ -158,7 +178,7 @@ class QdrantDB(VectorStore):
             logger.setLevel(level)
 
     def add_documents(self, documents: Sequence[Document]) -> None:
-        colls = self._list_all_collections()
+        colls = self.list_collections(empty=True)
         if len(documents) == 0:
             return
         embedding_vecs = self.embedding_fn([doc.content for doc in documents])
@@ -166,7 +186,7 @@ class QdrantDB(VectorStore):
             raise ValueError("No collection name set, cannot ingest docs")
         if self.config.collection_name not in colls:
             self.create_collection(self.config.collection_name, replace=True)
-        ids = [d.id() for d in documents]
+        ids = [self._to_int_or_uuid(d.id()) for d in documents]
         # don't insert all at once, batch in chunks of b,
         # else we get an API error
         b = self.config.batch_size
@@ -188,6 +208,26 @@ class QdrantDB(VectorStore):
             return int(id)
         except ValueError:
             return id
+
+    def get_all_documents(self) -> List[Document]:
+        if self.config.collection_name is None:
+            raise ValueError("No collection name set, cannot retrieve docs")
+        docs = []
+        offset = 0
+        while True:
+            results, next_page_offset = self.client.scroll(
+                collection_name=self.config.collection_name,
+                scroll_filter=None,
+                offset=offset,
+                limit=10_000,  # try getting all at once, if not we keep paging
+                with_payload=True,
+                with_vectors=False,
+            )
+            docs += [Document(**record.payload) for record in results]  # type: ignore
+            if next_page_offset is None:
+                break
+            offset = next_page_offset  # type: ignore
+        return docs
 
     def get_documents_by_ids(self, ids: List[str]) -> List[Document]:
         if self.config.collection_name is None:

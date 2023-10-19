@@ -1,7 +1,9 @@
 import inspect
+import json
 import logging
+import textwrap
 from contextlib import ExitStack
-from typing import Dict, List, Optional, Set, Type, cast, no_type_check
+from typing import Dict, List, Optional, Set, Tuple, Type, cast, no_type_check
 
 from rich import print
 from rich.console import Console
@@ -11,12 +13,12 @@ from langroid.agent.chat_document import ChatDocument
 from langroid.agent.tool_message import ToolMessage
 from langroid.io.base import IOFactory
 from langroid.language_models.base import (
-    LanguageModel,
     LLMFunctionSpec,
     LLMMessage,
     Role,
     StreamingIfAllowed,
 )
+from langroid.language_models.openai_gpt import OpenAIGPT
 from langroid.utils.configuration import settings
 
 console = Console()
@@ -29,8 +31,10 @@ class ChatAgentConfig(AgentConfig):
     Configuration for ChatAgent
     Attributes:
         system_message: system message to include in message sequence
-             (typically defines role and task of agent)
-        user_message: user message to include in message sequence
+             (typically defines role and task of agent).
+             Used only if `task` is not specified in the constructor.
+        user_message: user message to include in message sequence.
+             Used only if `task` is not specified in the constructor.
         use_tools: whether to use our own ToolMessages mechanism
         use_functions_api: whether to use functions native to the LLM API
                 (e.g. OpenAI's `function_call` mechanism)
@@ -40,6 +44,16 @@ class ChatAgentConfig(AgentConfig):
     user_message: Optional[str] = None
     use_tools: bool = True
     use_functions_api: bool = False
+
+    def _switch_fn_to_tools(self) -> None:
+        """
+        Switch to using our own ToolMessage mechanism,
+        in case the LLM is not an OpenAI model.
+        """
+        if not self.use_functions_api:
+            return
+        self.use_functions_api = False
+        self.use_tools = True
 
 
 class ChatAgent(Agent):
@@ -69,27 +83,74 @@ class ChatAgent(Agent):
         """
         super().__init__(config)
         self.config: ChatAgentConfig = config
+        if (
+            self.llm is not None
+            and (
+                not isinstance(self.llm, OpenAIGPT)
+                or not self.llm.is_openai_chat_model()
+            )
+            and self.config.use_functions_api
+        ):
+            # for non-OpenAI models, use Langroid Tool instead of Function-calling
+            logger.warning(
+                f"""
+                Function calling not available for {self.llm.config.chat_model},
+                switching to Langroid Tools instead.
+                """
+            )
+            self.config._switch_fn_to_tools()
+
         self.message_history: List[LLMMessage] = []
         self.tool_instructions_added: bool = False
-        # system-level instructions for using tools/functions
+        # An agent's "task" is defined by a system msg and an optional user msg;
+        # These are "priming" messages that kick off the agent's conversation.
+        self.system_message: str = self.config.system_message
+        self.user_message: str | None = self.config.user_message
+
+        if task is not None:
+            # if task contains a system msg, we override the config system msg
+            if len(task) > 0 and task[0].role == Role.SYSTEM:
+                self.system_message = task[0].content
+            # if task contains a user msg, we override the config user msg
+            if len(task) > 1 and task[1].role == Role.USER:
+                self.user_message = task[1].content
+
+        # system-level instructions for using tools/functions:
+        # We maintain these as tools/functions are enabled/disabled,
+        # and whenever an LLM response is sought, these are used to
+        # recreate the system message (via `_create_system_and_tools_message`)
+        # each time, so it reflects the current set of enabled tools/functions.
+        # (a) these are general instructions on using certain tools/functions,
+        #   if they are specified in a ToolMessage class as a classmethod `instructions`
         self.system_tool_instructions: str = ""
+        # (b) these are only for the builtin in Langroid TOOLS mechanism:
+        self.system_json_tool_instructions: str = ""
+
         self.llm_functions_map: Dict[str, LLMFunctionSpec] = {}
         self.llm_functions_handled: Set[str] = set()
         self.llm_functions_usable: Set[str] = set()
         self.llm_function_force: Optional[Dict[str, str]] = None
+        self.io_input = IOFactory.get_io("input")
+        self.io_output = IOFactory.get_io("output")
 
-        priming_messages = task
-        if priming_messages is None:
-            priming_messages = [
-                LLMMessage(role=Role.SYSTEM, content=config.system_message),
-            ]
-            if config.user_message:
-                priming_messages.append(
-                    LLMMessage(role=Role.USER, content=config.user_message)
-                )
-        self.task_messages = priming_messages
-        self.io_input = IOFactory.get_provider("input")
-        self.io_output = IOFactory.get_provider("output")
+    def set_system_message(self, msg: str) -> None:
+        self.system_message = msg
+
+    def set_user_message(self, msg: str) -> None:
+        self.user_message = msg
+
+    @property
+    def task_messages(self) -> List[LLMMessage]:
+        """
+        The task messages are the initial messages that define the task
+        of the agent. There will be at least a system message plus possibly a user msg.
+        Returns:
+            List[LLMMessage]: the task messages
+        """
+        msgs = [self._create_system_and_tools_message()]
+        if self.user_message:
+            msgs.append(LLMMessage(role=Role.USER, content=self.user_message))
+        return msgs
 
     def clear_history(self, start: int = -2) -> None:
         """
@@ -119,37 +180,127 @@ class ChatAgent(Agent):
             ]
         )
 
+    def json_format_rules(self) -> str:
+        """
+        Specification of JSON formatting rules, based on the currently enabled
+        usable `ToolMessage`s
+
+        Returns:
+            str: formatting rules
+        """
+        enabled_classes: List[Type[ToolMessage]] = list(self.llm_tools_map.values())
+        if len(enabled_classes) == 0:
+            return "You can ask questions in natural language."
+
+        json_instructions = "\n\n".join(
+            [
+                textwrap.dedent(
+                    f"""
+                TOOL: {msg_cls.default_value("request")}
+                PURPOSE: {msg_cls.default_value("purpose")} 
+                JSON FORMAT: {
+                    json.dumps(
+                        msg_cls.llm_function_schema(request=True).parameters,
+                        indent=4,
+                    )
+                }
+                {"EXAMPLE: " + msg_cls.usage_example() if msg_cls.examples() else ""}
+                """.lstrip()
+                )
+                for i, msg_cls in enumerate(enabled_classes)
+                if msg_cls.default_value("request") in self.llm_tools_usable
+            ]
+        )
+        return textwrap.dedent(
+            f"""
+            === ALL AVAILABLE TOOLS and THEIR JSON FORMAT INSTRUCTIONS ===
+            You have access to the following TOOLS to accomplish your task:
+
+            {json_instructions}
+            
+            When one of the above TOOLs is applicable, you must express your 
+            request as "TOOL:" followed by the request in the above JSON format.
+            """
+            + """
+            The JSON format will be:
+                \\{
+                    "request": "<tool_name>",
+                    "<arg1>": <value1>,
+                    "<arg2>": <value2>,
+                    ...
+                \\}             
+            ----------------------------
+            """.lstrip()
+        )
+
+    def tool_instructions(self) -> str:
+        """
+        Instructions for tools or function-calls, for enabled and usable Tools.
+        These are inserted into system prompt regardless of whether we are using
+        our own ToolMessage mechanism or the LLM's function-call mechanism.
+
+        Returns:
+            str: concatenation of instructions for all usable tools
+        """
+        enabled_classes: List[Type[ToolMessage]] = list(self.llm_tools_map.values())
+        if len(enabled_classes) == 0:
+            return ""
+        instructions = []
+        for msg_cls in enabled_classes:
+            if (
+                hasattr(msg_cls, "instructions")
+                and inspect.ismethod(msg_cls.instructions)
+                and msg_cls.default_value("request") in self.llm_tools_usable
+            ):
+                # example will be shown in json_format_rules() when using TOOLs,
+                # so we don't need to show it here.
+                example = "" if self.config.use_tools else (msg_cls.usage_example())
+                if example != "":
+                    example = "EXAMPLE: " + example
+                guidance = (
+                    ""
+                    if msg_cls.instructions() == ""
+                    else ("GUIDANCE: " + msg_cls.instructions())
+                )
+                if guidance == "" and example == "":
+                    continue
+                instructions.append(
+                    textwrap.dedent(
+                        f"""
+                        TOOL: {msg_cls.default_value("request")}:
+                        {guidance}
+                        {example}
+                        """.lstrip()
+                    )
+                )
+        if len(instructions) == 0:
+            return ""
+        instructions_str = "\n\n".join(instructions)
+        return textwrap.dedent(
+            f"""
+            === GUIDELINES ON SOME TOOLS/FUNCTIONS USAGE ===
+            {instructions_str}
+            """.lstrip()
+        )
+
     def augment_system_message(self, message: str) -> None:
         """
         Augment the system message with the given message.
         Args:
             message (str): system message
         """
-        if len(self.message_history) > 0:
-            if self.message_history[0].role == Role.SYSTEM:
-                self.message_history[0].content = (
-                    self.message_history[0].content + "\n\n" + message
-                )
-        else:
-            if self.task_messages[0].role == Role.SYSTEM:
-                self.task_messages[0].content = (
-                    self.task_messages[0].content + "\n\n" + message
-                )
+        self.system_message += "\n\n" + message
 
-    def add_user_message(self, message: str) -> None:
-        """
-        Add a user message to the message history.
-        Args:
-            message (str): user message
-        """
-        if len(self.message_history) > 0:
-            self.message_history.append(LLMMessage(role=Role.USER, content=message))
-        else:
-            self.task_messages.append(LLMMessage(role=Role.USER, content=message))
+    def last_message_with_role(self, role: Role) -> LLMMessage | None:
+        """from `message_history`, return the last message with role `role`"""
+        for i in range(len(self.message_history) - 1, -1, -1):
+            if self.message_history[i].role == role:
+                return self.message_history[i]
+        return None
 
     def update_last_message(self, message: str, role: str = Role.USER) -> None:
         """
-        Update the last message with role `role` in the message history.
+        Update the last message that has role `role` in the message history.
         Useful when we want to replace a long user prompt, that may contain context
         documents plus a question, with just the question.
         Args:
@@ -163,6 +314,33 @@ class ChatAgent(Agent):
             if self.message_history[i].role == role:
                 self.message_history[i].content = message
                 break
+
+    def _create_system_and_tools_message(self) -> LLMMessage:
+        """
+        (Re-)Create the system message for the LLM of the agent,
+        taking into account any tool instructions that have been added
+        after the agent was initialized.
+
+        The system message will consist of:
+        (a) the system message from the `task` arg in constructor, if any,
+            otherwise the default system message from the config
+        (b) the system tool instructions, if any
+        (c) the system json tool instructions, if any
+
+        Returns:
+            LLMMessage object
+        """
+        content = textwrap.dedent(
+            f"""
+            {self.system_message}
+            
+            {self.system_tool_instructions}
+            
+            {self.system_json_tool_instructions}
+            
+            """.lstrip()
+        )
+        return LLMMessage(role=Role.SYSTEM, content=content)
 
     def enable_message(
         self,
@@ -205,15 +383,7 @@ class ChatAgent(Agent):
                 self.llm_function_force = dict(name=request)
             else:
                 self.llm_function_force = None
-            if hasattr(message_class, "instructions") and inspect.ismethod(
-                message_class.instructions
-            ):
-                # save tool instructions so that when LLM is ready
-                # to respond (i.e. either when a wrapping Task is started,
-                # or when the LLM is directly queried),
-                # we can append to system msg.
-                self.system_tool_instructions += "\n\n" + message_class.instructions()
-        n_usable_tools = len(self.llm_tools_usable)
+
         for t in tools:
             if handle:
                 self.llm_tools_handled.add(t)
@@ -229,12 +399,10 @@ class ChatAgent(Agent):
                 self.llm_tools_usable.discard(t)
                 self.llm_functions_usable.discard(t)
 
-        # TODO we should do this only on demand when we actually are
-        # ready to send the instructions.
-        # But for now leave as is.
-        if len(self.llm_tools_usable) != n_usable_tools and self.config.use_tools:
-            # Update JSON format instructions if the set of usable tools has changed
-            self.update_json_tool_instructions()
+        # Set tool instructions and JSON format instructions
+        if self.config.use_tools:
+            self.system_json_tool_instructions = self.json_format_rules()
+        self.system_tool_instructions = self.tool_instructions()
 
     def disable_message_handling(
         self,
@@ -278,37 +446,6 @@ class ChatAgent(Agent):
                 self.llm_tools_usable.discard(r)
                 self.llm_functions_usable.discard(r)
 
-    def update_json_tool_instructions(self) -> None:
-        """
-        Add special instructions on situations when the LLM should send JSON-formatted
-        messages, and save the index position of these instructions in the
-        message history. Note this specifically only relates to the
-        Langroid JSON tools mechanism, not the LLM-native function-calling.
-        """
-        # Add the instructions as a user message...
-        # TODO need to adapt this based on model type, as some models may
-        # pay more attention to system message.
-        json_instructions = super().json_tool_format_instructions()
-        if not self.tool_instructions_added:
-            self.task_messages.append(
-                LLMMessage(role=Role.USER, content=json_instructions)
-            )
-            self.tool_instructions_added = True
-        else:
-            # json_instructions will contain instructions on ALL tools,
-            # so it is ok to overwrite the last message in the task_messages,
-            # since we know it is a tool-instruction msg.
-            self.task_messages[-1].content = json_instructions
-
-        # Note that task_messages is the initial set of messages created to set up
-        # the task, and they may not yet have been sent to the LLM at this point.
-
-        # But if the task_messages have already been sent to the LLM, then we need to
-        # update the self.message_history as well, since this history will be sent to
-        # the LLM on each round, after appending the latest assistant, user msgs.
-        if len(self.message_history) > 0:
-            self.message_history[-1].content = json_instructions
-
     @no_type_check
     def llm_response(
         self, message: Optional[str | ChatDocument] = None
@@ -322,21 +459,63 @@ class ChatAgent(Agent):
         Returns:
             LLM response as a ChatDocument object
         """
-        if not self.llm_can_respond(message):
+        if self.llm is None:
             return None
+        hist, output_len = self._prep_llm_messages(message)
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):
+            response = self.llm_response_messages(hist, output_len)
+        # TODO - when response contains function_call we should include
+        # that (and related fields) in the message_history
+        self.message_history.append(ChatDocument.to_LLMMessage(response))
+        return response
+
+    @no_type_check
+    async def llm_response_async(
+        self, message: Optional[str | ChatDocument] = None
+    ) -> Optional[ChatDocument]:
+        """
+        Async version of `llm_response`. See there for details.
+        """
+        if self.llm is None:
+            return None
+
+        hist, output_len = self._prep_llm_messages(message)
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):
+            response = await self.llm_response_messages_async(hist, output_len)
+        # TODO - when response contains function_call we should include
+        # that (and related fields) in the message_history
+        self.message_history.append(ChatDocument.to_LLMMessage(response))
+        return response
+
+    @no_type_check
+    def _prep_llm_messages(
+        self, message: Optional[str | ChatDocument] = None
+    ) -> Tuple[List[LLMMessage], int]:
+        """
+        Prepare messages to be sent to self.llm_response_messages,
+            which is the main method that calls the LLM API to get a response.
+
+        Returns:
+            Tuple[List[LLMMessage], int]: (messages, output_len)
+                messages = Full list of messages to send
+                output_len = max expected number of tokens in response
+        """
+
+        if not self.llm_can_respond(message):
+            return [], 0
 
         assert (
             message is not None or len(self.message_history) == 0
         ), "message can be None only if message_history is empty, i.e. at start."
 
         if len(self.message_history) == 0:
-            # task_messages have not yet been loaded, so load them
-            self.message_history = self.task_messages.copy()
-            # first message is system msg, augment if needed
-            if self.system_tool_instructions != "":
-                self.message_history[0].content += (
-                    "\n\n" + self.system_tool_instructions
+            # initial messages have not yet been loaded, so load them
+            self.message_history = [self._create_system_and_tools_message()]
+            if self.user_message:
+                self.message_history.append(
+                    LLMMessage(role=Role.USER, content=self.user_message)
                 )
+
             # for debugging, show the initial message history
             if settings.debug:
                 print(
@@ -345,6 +524,10 @@ class ChatAgent(Agent):
                 {self.message_history_str()}
                 """
                 )
+        else:
+            assert self.message_history[0].role == Role.SYSTEM
+            # update the system message with the latest tool instructions
+            self.message_history[0] = self._create_system_and_tools_message()
 
         if message is not None:
             llm_msg = ChatDocument.to_LLMMessage(message)
@@ -372,15 +555,16 @@ class ChatAgent(Agent):
                     # TODO we should really be doing summarization or other types of
                     #   prompt-size reduction
                     if len(hist) <= 2:
-                        # first two are "reserved" for the initial system, user msgs
-                        # that presumably set up the initial "priming" or "task" for
-                        # the agent.
+                        # We want to preserve the first message (typically system msg)
+                        # and last message (user msg).
                         raise ValueError(
                             """
                         The message history is longer than the max chat context 
                         length allowed, and we have run out of messages to drop."""
                         )
-                    hist = hist[:2] + hist[3:]
+                    # drop the second message, i.e. first msg after the sys msg
+                    # (typically user msg).
+                    hist = hist[:1] + hist[2:]
 
                 if len(hist) < len(self.message_history):
                     msg_tokens = self.chat_num_tokens()
@@ -389,26 +573,34 @@ class ChatAgent(Agent):
                     Chat Model context length is {self.llm.chat_context_length()} 
                     tokens, but the current message history is {msg_tokens} tokens long.
                     Dropped the {len(self.message_history) - len(hist)} messages
-                    from early in the conversation history so total tokens are 
-                    low enough to allow minimum output length of 
+                    from early in the conversation history so that history token 
+                    length is {self.chat_num_tokens(hist)}.
+                    This may still not be low enough to allow minimum output length of 
                     {self.config.llm.min_output_tokens} tokens.
                     """
                     )
 
-        if output_len < self.config.llm.min_output_tokens:
+        if output_len < 0:
             raise ValueError(
+                f"""
+                Tried to shorten prompt history for chat mode 
+                but even after dropping all messages except system msg and last (
+                user) msg, the history token len {self.chat_num_tokens(hist)} is longer 
+                than the model's max context length {self.llm.chat_context_length()}.
+                Please try shortening the system msg or user prompts.
+                """
+            )
+        if output_len < self.config.llm.min_output_tokens:
+            logger.warning(
                 f"""
                 Tried to shorten prompt history for chat mode 
                 but the feasible output length {output_len} is still
                 less than the minimum output length {self.config.llm.min_output_tokens}.
+                Your chat history is too long for this model, 
+                and the response may be truncated.
                 """
             )
-        with StreamingIfAllowed(self.llm):
-            response = self.llm_response_messages(hist, output_len)
-        # TODO - when response contains function_call we should include
-        # that (and related fields) in the message_history
-        self.message_history.append(ChatDocument.to_LLMMessage(response))
-        return response
+        return hist, output_len
 
     def llm_response_messages(
         self, messages: List[LLMMessage], output_len: Optional[int] = None
@@ -417,18 +609,20 @@ class ChatAgent(Agent):
         Respond to a series of messages, e.g. with OpenAI ChatCompletion
         Args:
             messages: seq of messages (with role, content fields) sent to LLM
+            output_len: max number of tokens expected in response.
+                    If None, use the LLM's default max_output_tokens.
         Returns:
             Document (i.e. with fields "content", "metadata")
         """
         assert self.config.llm is not None and self.llm is not None
         output_len = output_len or self.config.llm.max_output_tokens
         with ExitStack() as stack:  # for conditionally using rich spinner
-            if not self.llm.get_stream():  # type: ignore
+            if not self.llm.get_stream():
                 # show rich spinner only if not streaming!
                 cm = console.status("LLM responding to messages...")
                 stack.enter_context(cm)
             if self.llm.get_stream():  # type: ignore
-                self.io_output(f"[green]{self.indent}")
+                self.io_output(f"[green]{self.indent}", streaming=True)
             functions: Optional[List[LLMFunctionSpec]] = None
             fun_call: str | Dict[str, str] = "none"
             if self.config.use_functions_api and len(self.llm_functions_usable) > 0:
@@ -441,15 +635,57 @@ class ChatAgent(Agent):
                     else self.llm_function_force
                 )
             assert self.llm is not None
-            response = cast(LanguageModel, self.llm).chat(
+            response = self.llm.chat(
                 messages,
                 output_len,
                 functions=functions,
                 function_call=fun_call,
             )
-        displayed = False
-        if not self.llm.get_stream() or response.cached:  # type: ignore
-            displayed = True
+        if not self.llm.get_stream() or response.cached:
+            # We would have already displayed the msg "live" ONLY if
+            # streaming was enabled, AND we did not find a cached response.
+            # If we are here, it means the response has not yet been displayed.
+            cached = f"[red]{self.indent}(cached)[/red]" if response.cached else ""
+            if response.function_call is not None:
+                response_str = str(response.function_call)
+            else:
+                response_str = response.message
+            self.io_output(cached + "[green]" + response_str)
+        self.update_token_usage(
+            response,
+            messages,
+            self.llm.get_stream(),
+            print_response_stats=self.config.show_stats,
+        )
+        return ChatDocument.from_LLMResponse(response, displayed=True)
+
+    async def llm_response_messages_async(
+        self, messages: List[LLMMessage], output_len: Optional[int] = None
+    ) -> ChatDocument:
+        """
+        Async version of `llm_response_messages`. See there for details.
+        """
+        assert self.config.llm is not None and self.llm is not None
+        output_len = output_len or self.config.llm.max_output_tokens
+        functions: Optional[List[LLMFunctionSpec]] = None
+        fun_call: str | Dict[str, str] = "none"
+        if self.config.use_functions_api and len(self.llm_functions_usable) > 0:
+            functions = [self.llm_functions_map[f] for f in self.llm_functions_usable]
+            fun_call = (
+                "auto" if self.llm_function_force is None else self.llm_function_force
+            )
+        assert self.llm is not None
+        response = await self.llm.achat(
+            messages,
+            output_len,
+            functions=functions,
+            function_call=fun_call,
+        )
+
+        if not self.llm.get_stream() or response.cached:
+            # We would have already displayed the msg "live" ONLY if
+            # streaming was enabled, AND we did not find a cached response.
+            # If we are here, it means the response has not yet been displayed.
             cached = f"[red]{self.indent}(cached)[/red]" if response.cached else ""
             if response.function_call is not None:
                 response_str = str(response.function_call)
@@ -457,8 +693,13 @@ class ChatAgent(Agent):
                 response_str = response.message
             self.io_output(cached + "[green]" + response_str)
         stream = self.llm.get_stream()  # type: ignore
-        self.update_token_usage(response, messages, stream)
-        return ChatDocument.from_LLMResponse(response, displayed)
+        self.update_token_usage(
+            response,
+            messages,
+            self.llm.get_stream(),
+            print_response_stats=self.config.show_stats,
+        )
+        return ChatDocument.from_LLMResponse(response, displayed=True)
 
     def _llm_response_temp_context(self, message: str, prompt: str) -> ChatDocument:
         """
@@ -475,7 +716,24 @@ class ChatAgent(Agent):
         """
         # we explicitly call THIS class's respond method,
         # not a derived class's (or else there would be infinite recursion!)
-        answer_doc = cast(ChatDocument, ChatAgent.llm_response(self, prompt))
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):  # type: ignore
+            answer_doc = cast(ChatDocument, ChatAgent.llm_response(self, prompt))
+        self.update_last_message(message, role=Role.USER)
+        return answer_doc
+
+    async def _llm_response_temp_context_async(
+        self, message: str, prompt: str
+    ) -> ChatDocument:
+        """
+        Async version of `_llm_response_temp_context`. See there for details.
+        """
+        # we explicitly call THIS class's respond method,
+        # not a derived class's (or else there would be infinite recursion!)
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):  # type: ignore
+            answer_doc = cast(
+                ChatDocument,
+                await ChatAgent.llm_response_async(self, prompt),
+            )
         self.update_last_message(message, role=Role.USER)
         return answer_doc
 
@@ -494,7 +752,24 @@ class ChatAgent(Agent):
         """
         # explicitly call THIS class's respond method,
         # not a derived class's (or else there would be infinite recursion!)
-        response = cast(ChatDocument, ChatAgent.llm_response(self, message))
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):  # type: ignore
+            response = cast(ChatDocument, ChatAgent.llm_response(self, message))
+        # clear the last two messages, which are the
+        # user message and the assistant response
+        self.message_history.pop()
+        self.message_history.pop()
+        return response
+
+    async def llm_response_forget_async(self, message: str) -> ChatDocument:
+        """
+        Async version of `llm_response_forget`. See there for details.
+        """
+        # explicitly call THIS class's respond method,
+        # not a derived class's (or else there would be infinite recursion!)
+        with StreamingIfAllowed(self.llm, self.llm.get_stream()):  # type: ignore
+            response = cast(
+                ChatDocument, await ChatAgent.llm_response_async(self, message)
+            )
         # clear the last two messages, which are the
         # user message and the assistant response
         self.message_history.pop()

@@ -10,7 +10,7 @@ the code and returns the result as a string.
 import io
 import logging
 import sys
-from typing import no_type_check
+from typing import List, no_type_check
 
 import numpy as np
 import pandas as pd
@@ -44,6 +44,10 @@ For example you may first want to know something about the possible values in a 
 If you receive a null or other unexpected result, see if you have made an assumption
 in your code, and try another way, or use `run_code` to explore the dataframe 
 before submitting your final code. 
+
+Once you have the answer to the question, say DONE and show me the answer.
+If you receive an error message, try using the `run_code` tool/function 
+again with the corrected code. 
 
 Start by asking me what I want to know about the data.
 """
@@ -115,12 +119,21 @@ class TableChatAgentConfig(ChatAgentConfig):
 
 
 class RunCodeTool(ToolMessage):
+    """Tool/function to run code on a dataframe named `df`"""
+
     request: str = "run_code"
     purpose: str = """
             To run <code> on the dataframe 'df' and 
             return the results to answer a question.
             """
     code: str
+
+    @classmethod
+    def examples(cls) -> List["ToolMessage"]:
+        return [
+            cls(code="df.head()"),
+            cls(code="df[(df['gender'] == 'Male')]['income'].mean()"),
+        ]
 
 
 class TableChatAgent(ChatAgent):

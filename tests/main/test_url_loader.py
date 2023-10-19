@@ -8,7 +8,7 @@ def test_url_loader():
         urls=[
             "https://pytorch.org",
             "https://openai.com",
-        ]
+        ],
     )
 
     docs = loader.load()

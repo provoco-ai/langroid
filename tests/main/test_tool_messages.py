@@ -17,7 +17,6 @@ from langroid.language_models.openai_gpt import (
 from langroid.parsing.parser import ParsingConfig
 from langroid.prompts.prompts_config import PromptsConfig
 from langroid.utils.configuration import Settings, set_global
-from langroid.utils.system import rmdir
 
 IOFactory.set_provider(CmdInputProvider("input"))
 IOFactory.set_provider(CmdOutputProvider("output"))
@@ -81,8 +80,6 @@ class MessageHandlingAgent(ChatAgent):
         )
 
 
-qd_dir = ".qdrant/testdata_test_agent"
-rmdir(qd_dir)
 cfg = ChatAgentConfig(
     name="test-langroid",
     vecdb=None,
@@ -173,8 +170,6 @@ def test_usage_instruction(msg_cls: ToolMessage):
     usage = msg_cls.usage_example()
     assert json.loads(usage)["request"] == msg_cls.default_value("request")
 
-
-rmdir(qd_dir)  # don't need it here
 
 NONE_MSG = "nothing to see here"
 
@@ -307,6 +302,13 @@ def test_llm_tool_message(
     agent = MessageHandlingAgent(cfg)
     agent.config.use_functions_api = use_functions_api
     agent.config.use_tools = not use_functions_api
+    if not agent.llm.is_openai_chat_model() and use_functions_api:
+        pytest.skip(
+            f"""
+            Function Calling not available for {agent.config.llm.chat_model}: skipping
+            """
+        )
+
     agent.enable_message(FileExistsMessage)
     agent.enable_message(PythonVersionMessage)
     agent.enable_message(CountryCapitalMessage)
@@ -324,7 +326,8 @@ def test_llm_tool_message(
     assert result.lower() in agent_result.lower()
 
 
-def test_llm_non_tool():
+def test_llm_non_tool(test_settings: Settings):
+    agent = MessageHandlingAgent(cfg)
     llm_msg = agent.llm_response_forget(
         "Ask me to check what is the population of France."
     ).content

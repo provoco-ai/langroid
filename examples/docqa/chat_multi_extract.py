@@ -16,8 +16,10 @@ from rich import print
 from pydantic import BaseModel, BaseSettings
 from typing import List
 import json
+import os
 
 from langroid.agent.special.doc_chat_agent import DocChatAgent, DocChatAgentConfig
+from langroid.parsing.parser import ParsingConfig
 from langroid.agent.chat_agent import ChatAgent, ChatAgentConfig
 from langroid.agent.task import Task
 from langroid.agent.tool_message import ToolMessage
@@ -29,6 +31,7 @@ from langroid.utils.constants import NO_ANSWER
 app = typer.Typer()
 
 setup_colored_logging()
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 class LeasePeriod(BaseModel):
@@ -53,6 +56,8 @@ class Lease(BaseModel):
 
 
 class LeaseMessage(ToolMessage):
+    """Tool/function to use to present details about a commercial lease"""
+
     request: str = "lease_info"
     purpose: str = """
         Collect information about a Commercial Lease.
@@ -103,7 +108,16 @@ class CLIOptions(BaseSettings):
 
 
 def chat(opts: CLIOptions) -> None:
-    doc_agent = DocChatAgent(DocChatAgentConfig())
+    doc_agent = DocChatAgent(
+        DocChatAgentConfig(
+            parsing=ParsingConfig(
+                chunk_size=100,
+                overlap=20,
+                n_similar_docs=4,
+            ),
+            cross_encoder_reranking_model="",
+        )
+    )
     doc_agent.vecdb.set_collection("docqa-chat-multi-extract", replace=True)
     print("[blue]Welcome to the real-estate info-extractor!")
     doc_agent.config.doc_paths = [
@@ -126,6 +140,7 @@ def chat(opts: CLIOptions) -> None:
             llm=OpenAIGPTConfig(),
             use_functions_api=opts.fn_api,
             use_tools=not opts.fn_api,
+            vecdb=None,
         )
     )
     lease_extractor_agent.enable_message(
@@ -144,8 +159,7 @@ def chat(opts: CLIOptions) -> None:
         have access to the lease itself. 
         You can ask me questions about the lease, ONE AT A TIME, I will answer each 
         question. You only need to collect info corresponding to the fields in this 
-        example:
-        {LeaseMessage.usage_example()}
+        specified structure. 
         If I am unable to answer your question initially, try asking me 
         differently. If I am still unable to answer after 3 tries, fill in 
         {NO_ANSWER} for that field.

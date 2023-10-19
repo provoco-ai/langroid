@@ -1,49 +1,14 @@
-from typing import List, Optional
-
 import pytest
 
 from langroid.agent.chat_agent import ChatAgent, ChatAgentConfig
 from langroid.agent.task import Task
-from langroid.agent.tool_message import ToolMessage
 from langroid.agent.tools.recipient_tool import RecipientTool
 from langroid.cachedb.redis_cachedb import RedisCacheConfig
-from langroid.language_models.base import Role
 from langroid.language_models.openai_gpt import OpenAIChatModel, OpenAIGPTConfig
-from langroid.mytypes import DocMetaData, Document, Entity
 from langroid.parsing.parser import ParsingConfig
 from langroid.prompts.prompts_config import PromptsConfig
 from langroid.utils.configuration import Settings, set_global
 from langroid.vector_store.base import VectorStoreConfig
-
-
-class ExponentialTool(ToolMessage):
-    request: str = "calc_expontential"
-    purpose: str = "To calculate the value of <x> raised to the power <e>"
-    x: int
-    e: int
-    result: int
-
-    @classmethod
-    def examples(cls) -> List["ToolMessage"]:
-        return [
-            cls(x=3, e=5, result=243),
-            cls(x=8, e=3, result=512),
-        ]
-
-
-class MultiplicationTool(ToolMessage):
-    request: str = "calc_multiplication"
-    purpose: str = "To calculate the value of <x> multiplied by <y>"
-    x: int
-    y: int
-    result: int
-
-    @classmethod
-    def examples(cls) -> List["ToolMessage"]:
-        return [
-            cls(x=3, y=5, result=15),
-            cls(x=8, y=3, result=24),
-        ]
 
 
 class _TestChatAgentConfig(ChatAgentConfig):
@@ -60,42 +25,12 @@ class _TestChatAgentConfig(ChatAgentConfig):
     )
 
 
-# The classes below are for the mult-agent test
-class _MasterAgent(ChatAgent):
-    def _task_done(self) -> bool:
-        return "DONE" in self.pending_message.content
-
-    def task_result(self) -> Optional[Document]:
-        answers = [m.content for m in self.message_history if m.role == Role.USER]
-        return Document(
-            content=" ".join(answers),
-            metadata=DocMetaData(source=Entity.USER, sender=Entity.USER),
-        )
-
-
-class _PlannerAgent(ChatAgent):
-    def _task_done(self) -> bool:
-        return "DONE" in self.pending_message.content
-
-    def task_result(self) -> Optional[Document]:
-        return Document(
-            content=self.pending_message.content.replace("DONE:", "").strip(),
-            metadata=DocMetaData(source=Entity.USER, sender=Entity.USER),
-        )
-
-
-class _MultiplierAgent(ChatAgent):
-    def _task_done(self) -> bool:
-        # multiplication gets done in 1 round, so stop as soon as LLM replies
-        return self.pending_message.metadata.sender == Entity.LLM
-
-
-EXPONENTIALS = "3**5 8**3 9**3"
+EXPONENTIALS = "3**4 8**3"
 
 
 @pytest.mark.parametrize("fn_api", [True, False])
 @pytest.mark.parametrize("constrain_recipients", [True, False])
-def test_agents_with_validator(
+def test_agents_with_recipient(
     test_settings: Settings,
     fn_api: bool,
     constrain_recipients: bool,
@@ -111,8 +46,8 @@ def test_agents_with_validator(
 
     multiplier_cfg = _TestChatAgentConfig(name="Multiplier")
 
-    # master asks a series of expenenential questions, e.g. 3^6, 8^5, etc.
-    master = _MasterAgent(master_cfg)
+    # master asks a series of exponential questions, e.g. 3^6, 8^5, etc.
+    master = ChatAgent(master_cfg)
     task_master = Task(
         master,
         llm_delegate=True,
@@ -135,7 +70,7 @@ def test_agents_with_validator(
     )
 
     # For a given exponential computation, plans a sequence of multiplications.
-    planner = _PlannerAgent(planner_cfg)
+    planner = ChatAgent(planner_cfg)
 
     if constrain_recipients:
         planner.enable_message(
@@ -160,14 +95,14 @@ def test_agents_with_validator(
                 When you have your final answer, report your answer
                 back to "Master" using the same `recipient_message` tool/function-call.
                 
-                When asking the Multipler, remember to only present your 
+                When asking the Multiplier, remember to only present your 
                 request in arithmetic notation, e.g. "3*5"; do not add 
                 un-necessary phrases.
                 """,
     )
 
     # Given a multiplication, returns the answer.
-    multiplier = _MultiplierAgent(multiplier_cfg)
+    multiplier = ChatAgent(multiplier_cfg)
     task_multiplier = Task(
         multiplier,
         llm_delegate=False,

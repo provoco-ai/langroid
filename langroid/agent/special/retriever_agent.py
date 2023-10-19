@@ -1,5 +1,8 @@
 """
-Agent to retrieve relevant verbatim whole docs/records from a vector store.
+Agent to retrieve relevant verbatim whole docs/records from a vector store,
+where the LLM is used to filter for "true" relevance after retrieval from the
+vector store.
+See test_retriever_agent.py for example usage.
 """
 import logging
 from abc import ABC, abstractmethod
@@ -11,6 +14,7 @@ from rich.console import Console
 from langroid.agent.chat_document import ChatDocMetaData, ChatDocument
 from langroid.agent.special.doc_chat_agent import DocChatAgent, DocChatAgentConfig
 from langroid.embedding_models.models import OpenAIEmbeddingsConfig
+from langroid.language_models.base import StreamingIfAllowed
 from langroid.language_models.openai_gpt import OpenAIChatModel, OpenAIGPTConfig
 from langroid.mytypes import DocMetaData, Document, Entity
 from langroid.parsing.parser import ParsingConfig, Splitter
@@ -41,7 +45,6 @@ class RetrieverAgentConfig(DocChatAgentConfig):
     stream: bool = True  # allow streaming where needed
     max_tokens: int = 10000
     vecdb: VectorStoreConfig = QdrantDBConfig(
-        type="qdrant",
         collection_name=None,
         storage_path=".qdrant/data/",
         embedding=OpenAIEmbeddingsConfig(
@@ -112,29 +115,6 @@ class RetrieverAgent(DocChatAgent, ABC):
             metadata=ChatDocMetaData(**meta),
         )
 
-    def get_nearest_docs(self, query: str) -> List[Document]:
-        """
-        Given a query, get the records/docs whose contents are closest to the
-            query, in terms of vector similarity.
-        Args:
-            query: query string
-        Returns:
-            list of Document objects
-        """
-        if self.vecdb is None:
-            logger.warning("No vector store specified")
-            return []
-        with console.status("[cyan]Searching VecDB for similar docs/records..."):
-            docs_and_scores = self.vecdb.similar_texts_with_scores(
-                query,
-                k=self.config.parsing.n_similar_docs,
-            )
-        docs: List[Document] = [
-            Document(content=d.content, metadata=d.metadata)
-            for (d, _) in docs_and_scores
-        ]
-        return docs
-
     def get_relevant_extracts(self, query: str) -> List[Document]:
         """
         Given a query, get the records/docs whose contents are most relevant to the
@@ -152,14 +132,15 @@ class RetrieverAgent(DocChatAgent, ABC):
                 source="None",
             ),
         )
-        nearest_docs = self.get_nearest_docs(query)
+        nearest_docs = self.get_relevant_chunks(query)
         if len(nearest_docs) == 0:
             return [response]
         if self.llm is None:
             logger.warning("No LLM specified")
             return nearest_docs
         with console.status("LLM selecting relevant docs from retrieved ones..."):
-            doc_list = self.llm_select_relevant_docs(query, nearest_docs)
+            with StreamingIfAllowed(self.llm, False):
+                doc_list = self.llm_select_relevant_docs(query, nearest_docs)
 
         return doc_list
 
@@ -202,8 +183,8 @@ class RetrieverAgent(DocChatAgent, ABC):
         if self.llm is None:
             logger.warning("No LLM specified")
             return [default_response]
-        response = self.llm.generate(  # type: ignore
-            prompt, max_tokens=self.config.llm.max_output_tokens  # type: ignore
+        response = self.llm.generate(
+            prompt, max_tokens=self.config.llm.max_output_tokens
         )
         if response.message == NO_ANSWER:
             return [default_response]

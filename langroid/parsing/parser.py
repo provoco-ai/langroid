@@ -19,9 +19,18 @@ class Splitter(str, Enum):
     SIMPLE = "simple"
 
 
+class PdfParsingConfig(BaseSettings):
+    library: str = "pdfplumber"
+
+
+class DocxParsingConfig(BaseSettings):
+    library: str = "unstructured"
+
+
 class ParsingConfig(BaseSettings):
     splitter: str = Splitter.TOKENS
     chunk_size: int = 200  # aim for this many tokens per chunk
+    overlap: int = 50  # overlap between chunks
     max_chunks: int = 10_000
     # aim to have at least this many chars per chunk when truncating due to punctuation
     min_chunk_chars: int = 350
@@ -29,6 +38,8 @@ class ParsingConfig(BaseSettings):
     n_similar_docs: int = 4
     separators: List[str] = ["\n\n", "\n", " ", ""]
     token_encoding_model: str = "text-embedding-ada-002"
+    pdf: PdfParsingConfig = PdfParsingConfig()
+    docx: DocxParsingConfig = DocxParsingConfig()
 
 
 class Parser:
@@ -198,11 +209,18 @@ class Parser:
     def split(self, docs: List[Document]) -> List[Document]:
         if len(docs) == 0:
             return []
+        # some docs are already splits, so don't split them further!
+        chunked_docs = [d for d in docs if d.metadata.is_chunk]
+        big_docs = [d for d in docs if not d.metadata.is_chunk]
+        if len(big_docs) == 0:
+            return chunked_docs
         if self.config.splitter == Splitter.PARA_SENTENCE:
-            return self.split_para_sentence(docs)
+            big_doc_chunks = self.split_para_sentence(big_docs)
         elif self.config.splitter == Splitter.TOKENS:
-            return self.split_chunk_tokens(docs)
+            big_doc_chunks = self.split_chunk_tokens(big_docs)
         elif self.config.splitter == Splitter.SIMPLE:
-            return self.split_simple(docs)
+            big_doc_chunks = self.split_simple(big_docs)
         else:
             raise ValueError(f"Unknown splitter: {self.config.splitter}")
+
+        return chunked_docs + big_doc_chunks

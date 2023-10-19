@@ -28,11 +28,12 @@ rmdir(storage_path)
 
 
 class _TestDocChatAgentConfig(DocChatAgentConfig):
+    cross_encoder_reranking_model = ""
+    n_query_rephrases = 0
     debug: bool = False
     stream: bool = True  # allow streaming where needed
     conversation_mode = True
     vecdb: VectorStoreConfig = QdrantDBConfig(
-        type="qdrant",
         collection_name="test-data",
         replace_collection=True,
         storage_path=storage_path,

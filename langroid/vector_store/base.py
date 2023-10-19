@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class VectorStoreConfig(BaseSettings):
+    type: str = ""  # deprecated, keeping it for backward compatibility
     collection_name: str | None = None
     replace_collection: bool = False  # replace collection if it already exists
     storage_path: str = ".qdrant/data"
@@ -23,7 +24,6 @@ class VectorStoreConfig(BaseSettings):
         model_type="openai",
     )
     timeout: int = 60
-    type: str = "qdrant"
     host: str = "127.0.0.1"
     port: int = 6333
     # compose_file: str = "langroid/vector_store/docker-compose-qdrant.yml"
@@ -38,15 +38,35 @@ class VectorStore(ABC):
         self.config = config
 
     @staticmethod
-    def create(config: VectorStoreConfig) -> "VectorStore":
-        from langroid.vector_store.chromadb import ChromaDB
-        from langroid.vector_store.qdrantdb import QdrantDB
+    def create(config: VectorStoreConfig) -> Optional["VectorStore"]:
+        from langroid.vector_store.chromadb import ChromaDB, ChromaDBConfig
+        from langroid.vector_store.lancedb import LanceDB, LanceDBConfig
+        from langroid.vector_store.meilisearch import MeiliSearch, MeiliSearchConfig
+        from langroid.vector_store.momento import MomentoVI, MomentoVIConfig
+        from langroid.vector_store.qdrantdb import QdrantDB, QdrantDBConfig
 
-        vecstore_class = dict(qdrant=QdrantDB, chroma=ChromaDB).get(
-            config.type, QdrantDB
-        )
+        if isinstance(config, QdrantDBConfig):
+            return QdrantDB(config)
+        elif isinstance(config, ChromaDBConfig):
+            return ChromaDB(config)
+        elif isinstance(config, MomentoVIConfig):
+            return MomentoVI(config)
+        elif isinstance(config, LanceDBConfig):
+            return LanceDB(config)
+        elif isinstance(config, MeiliSearchConfig):
+            return MeiliSearch(config)
 
-        return vecstore_class(config)  # type: ignore
+        else:
+            logger.warning(
+                f"""
+                Unknown vector store config: {config.__repr_name__()},
+                so skipping vector store creation!
+                If you intended to use a vector-store, please set a specific 
+                vector-store in your script, typically in the `vecdb` field of a 
+                `ChatAgentConfig`, otherwise set it to None.
+                """
+            )
+            return None
 
     @abstractmethod
     def clear_empty_collections(self) -> int:
@@ -56,8 +76,24 @@ class VectorStore(ABC):
         pass
 
     @abstractmethod
-    def list_collections(self) -> List[str]:
-        """List all collections in the vector store."""
+    def clear_all_collections(self, really: bool = False, prefix: str = "") -> int:
+        """
+        Clear all collections in the vector store.
+
+        Args:
+            really (bool, optional): Whether to really clear all collections.
+                Defaults to False.
+            prefix (str, optional): Prefix of collections to clear.
+        Returns:
+            int: Number of collections deleted.
+        """
+        pass
+
+    @abstractmethod
+    def list_collections(self, empty: bool = False) -> List[str]:
+        """List all collections in the vector store
+        (only non empty collections if empty=False).
+        """
         pass
 
     def set_collection(self, collection_name: str, replace: bool = False) -> None:
@@ -97,6 +133,13 @@ class VectorStore(ABC):
         pass
 
     @abstractmethod
+    def get_all_documents(self) -> List[Document]:
+        """
+        Get all documents in the current collection.
+        """
+        pass
+
+    @abstractmethod
     def get_documents_by_ids(self, ids: List[str]) -> List[Document]:
         """
         Get documents by their ids.
@@ -115,4 +158,4 @@ class VectorStore(ABC):
     def show_if_debug(self, doc_score_pairs: List[Tuple[Document, float]]) -> None:
         if settings.debug:
             for i, (d, s) in enumerate(doc_score_pairs):
-                print_long_text("red", "italic red", f"MATCH-{i}", d.content)
+                print_long_text("red", "italic red", f"\nMATCH-{i}\n", d.content)
