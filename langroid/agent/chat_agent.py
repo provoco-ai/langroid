@@ -130,8 +130,8 @@ class ChatAgent(Agent):
         self.llm_functions_handled: Set[str] = set()
         self.llm_functions_usable: Set[str] = set()
         self.llm_function_force: Optional[Dict[str, str]] = None
-        self.io_input = IOFactory.get_io("input")
-        self.io_output = IOFactory.get_io("output")
+        self.io_input = IOFactory.get_provider("input")
+        self.io_output = IOFactory.get_provider("output")
 
     def set_system_message(self, msg: str) -> None:
         self.system_message = msg
