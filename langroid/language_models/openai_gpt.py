@@ -336,16 +336,16 @@ class OpenAIGPT(LanguageModel):
         if event_text:
             completion += event_text
             if not is_async:
-                self.io_output(Colors().GREEN + event_text, True)
+                self.io_output(Colors().GREEN + event_text)
         if event_fn_name:
             function_name = event_fn_name
             has_function = True
             if not is_async:
-                self.io_output(Colors().GREEN + "FUNC: " + event_fn_name + ": ", True)
+                self.io_output(Colors().GREEN + "FUNC: " + event_fn_name + ": ")
         if event_args:
             function_args += event_args
             if not is_async:
-                self.io_output(Colors().GREEN + event_args, True)
+                self.io_output(Colors().GREEN + event_args)
         if event["choices"][0].get("finish_reason", "") in ["stop", "function_call"]:
             # for function_call, finish_reason does not necessarily
             # contain "function_call" as mentioned in the docs.

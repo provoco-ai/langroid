@@ -27,23 +27,23 @@ def chat() -> None:
     IOFactory.set_provider(WebSocketInputProvider("input"))
     IOFactory.set_provider(WebSocketOutputProvider("output"))
 
-    # io_input = IOFactory.get_provider("input")
-    # io_output = IOFactory.get_provider("output")
+    io_input = IOFactory.get_provider("input")
+    io_output = IOFactory.get_provider("output")
 
-    # io_output(
-    #     """
-    #     [blue]Welcome to the basic chatbot!
-    #     Enter x or q to quit at any point.
-    #     """
-    # )
+    io_output(
+        """
+        [blue]Welcome to the basic chatbot!
+        Enter x or q to quit at any point.
+        """
+    )
 
-    # sys_msg = io_input(
-    #     "[blue]Tell me who I am. Hit Enter for default, or type your own\n",
-    #     default="Default: 'You are a helpful assistant'",
-    # )
+    sys_msg = io_input(
+        "[blue]Tell me who I am. Hit Enter for default, or type your own\n",
+        default="Default: 'You are a helpful assistant'",
+    )
 
     config = ChatAgentConfig(
-        # system_message=sys_msg,
+        system_message=sys_msg,
         llm=OpenAIGPTConfig(
             chat_model=OpenAIChatModel.GPT4,
         ),
