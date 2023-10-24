@@ -336,16 +336,16 @@ class OpenAIGPT(LanguageModel):
         if event_text:
             completion += event_text
             if not is_async:
-                self.io_output(f"[green]{event_text}")
+                self.io_output(f"[green]{event_text}", streaming=True)
         if event_fn_name:
             function_name = event_fn_name
             has_function = True
             if not is_async:
-                self.io_output(f"[green]FUNC: {event_fn_name}: ")
+                self.io_output(f"[green]FUNC: {event_fn_name}: ", streaming=True)
         if event_args:
             function_args += event_args
             if not is_async:
-                self.io_output(f"[green]{event_args}")
+                self.io_output(f"[green]{event_args}", streaming=True)
         if event["choices"][0].get("finish_reason", "") in ["stop", "function_call"]:
             # for function_call, finish_reason does not necessarily
             # contain "function_call" as mentioned in the docs.
@@ -371,7 +371,7 @@ class OpenAIGPT(LanguageModel):
         function_args = ""
         function_name = ""
 
-        self.io_output("[green]")
+        self.io_output("[green]", streaming=True)
         has_function = False
         for event in response:
             (
@@ -391,7 +391,7 @@ class OpenAIGPT(LanguageModel):
             if is_break:
                 break
 
-        self.io_output("")
+        self.io_output("") # Force line-break
         # TODO- get usage info in stream mode (?)
 
         return self._create_stream_response(
@@ -421,7 +421,7 @@ class OpenAIGPT(LanguageModel):
         function_args = ""
         function_name = ""
 
-        self.io_output("[green]")
+        self.io_output("[green]", streaming=True)
         has_function = False
         async for event in response:
             (
@@ -441,7 +441,7 @@ class OpenAIGPT(LanguageModel):
             if is_break:
                 break
 
-        self.io_output("")
+        self.io_output("") # Force line-break
         # TODO- get usage info in stream mode (?)
 
         return self._create_stream_response(

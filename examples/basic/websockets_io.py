@@ -40,7 +40,7 @@ class WebSocketInputProvider(InputProvider):
         def on_message(data):
             self.returned_value = data["text"]
 
-        self.sio.connect("http://172.17.0.3:3001")
+        self.sio.connect("http://127.0.0.1:3000")
 
         threading.Thread(target=self.setup, daemon=True).start()
 
@@ -65,7 +65,7 @@ class WebSocketOutputProvider(OutputProvider):
         self.streaming = False
         self.sio = socketio.Client()
 
-        self.sio.connect("http://172.17.0.3:3001")
+        self.sio.connect("http://127.0.0.1:3000")
 
         threading.Thread(target=self.setup, daemon=True).start()
 
