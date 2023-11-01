@@ -33,7 +33,7 @@ from langroid.language_models.utils import (
     retry_with_exponential_backoff,
 )
 from langroid.utils.configuration import settings
-from langroid.utils.constants import Colors, NO_ANSWER
+from langroid.utils.constants import NO_ANSWER
 
 logging.getLogger("openai").setLevel(logging.ERROR)
 litellm.telemetry = False
@@ -371,7 +371,7 @@ class OpenAIGPT(LanguageModel):
         function_args = ""
         function_name = ""
 
-        self.io_output("[green]", streaming=True)
+        self.io_output("[green]")
         has_function = False
         for event in response:
             (
@@ -421,7 +421,7 @@ class OpenAIGPT(LanguageModel):
         function_args = ""
         function_name = ""
 
-        self.io_output("[green]", streaming=True)
+        self.io_output("[green]")
         has_function = False
         async for event in response:
             (

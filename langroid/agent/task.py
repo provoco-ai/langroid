@@ -438,7 +438,7 @@ class Task:
             if self.agent.config.llm is None
             else self.agent.config.llm.chat_model
         )
-        self.io_output(
+        print(
             f"[bold magenta]{self._enter} Starting Agent "
             f"{self.name} ({self.message_history_idx+1}) {llm_model} [/bold magenta]"
         )
@@ -464,7 +464,7 @@ class Task:
                 # ONLY talking to the current agent.
                 if isinstance(t.agent, ChatAgent):
                     t.agent.clear_history(0)
-        self.io_output(
+        print(
             f"[bold magenta]{self._leave} Finished Agent "
             f"{self.name} ({n_messages}) [/bold magenta]"
         )
