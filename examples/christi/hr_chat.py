@@ -82,11 +82,11 @@ def main(
     )
     agent.vecdb.set_collection(agent.vecdb.config.collection_name, replace = rebuild)
     if rebuild:
-        data = pd.read_csv(os.path.join(os.path.dirname(sys.argv[0]), "hr_urls.csv")).iloc[:, 0].values.tolist()
+        #data = pd.read_csv(os.path.join(os.path.dirname(sys.argv[0]), "hr_urls.csv")).iloc[:, 0].values.tolist()
         agent.config.doc_paths = [
-            "https://hr.wisc.edu/policies/",
-            *data,
-            #"https://www.gutenberg.org/cache/epub/1513/pg1513-images.html"
+            #"https://hr.wisc.edu/policies/",
+            #*data,
+            "https://www.irs.gov/pub/irs-pdf/p334.pdf"
         ]
     agent.ingest()
 

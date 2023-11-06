@@ -1,0 +1,28 @@
+{
+  "name": "${localWorkspaceFolderBasename}",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/code/${localWorkspaceFolderBasename},type=bind,consistency=cached",
+  "workspaceFolder": "/code/${localWorkspaceFolderBasename}",
+  "runArgs": [
+    "--gpus",
+    "all",
+    "--name",
+    "${localWorkspaceFolderBasename}", // Container name
+    "-it",
+    "-l",
+    "com.docker.compose.project=devcontainers" // Container group name
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "dockerDashComposeVersion": "v2"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["esbenp.prettier-vscode"]
+    }
+  }
+}
