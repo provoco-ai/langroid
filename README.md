@@ -8,25 +8,12 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/langroid)](https://pypi.org/project/langroid/)
 [![Pytest](https://github.com/langroid/langroid/actions/workflows/pytest.yml/badge.svg)](https://github.com/langroid/langroid/actions/workflows/pytest.yml)
 [![codecov](https://codecov.io/gh/langroid/langroid/branch/main/graph/badge.svg?token=H94BX5F0TE)](https://codecov.io/gh/langroid/langroid)
-[![Lint](https://github.com/langroid/langroid/actions/workflows/validate.yml/badge.svg)](https://github.com/langroid/langroid/actions/workflows/validate.yml)
-[![Docs](https://github.com/langroid/langroid/actions/workflows/mkdocs-deploy.yml/badge.svg)](https://github.com/langroid/langroid/actions/workflows/mkdocs-deploy.yml)
-
-[![Static Badge](https://img.shields.io/badge/Documentation-blue?link=https%3A%2F%2Flangroid.github.io%2Flangroid%2F&link=https%3A%2F%2Flangroid.github.io%2Flangroid%2F)](https://langroid.github.io/langroid)
-[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ZU36McDgDs)
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/langroid/langroid/blob/main/examples/langroid_quick_examples.ipynb)
-
-[![Docker Pulls](https://img.shields.io/docker/pulls/langroid/langroid.svg)](https://hub.docker.com/r/langroid/langroid)
-![Docker Image Size (tag)](https://img.shields.io/docker/image-size/langroid/langroid/latest)
 [![Multi-Architecture DockerHub](https://github.com/langroid/langroid/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/langroid/langroid/actions/workflows/docker-publish.yml)
 
-[![Substack](https://img.shields.io/badge/Substack-%23006f5c.svg?style=for-the-badge&logo=substack&logoColor=FF6719)](https://langroid.substack.com/p/langroid-harness-llms-with-multi-agent-programming)
-
-[![Share on Hacker News](https://img.shields.io/badge/-Share%20on%20Hacker%20News-orange)](https://news.ycombinator.com/submitlink?u=https%3A%2F%2Fgithub.com%2Flangroid%2Flangroid&t=Harness%20LLMs%20with%20Multi-Agent%20Programming)
-[![Share on Reddit](https://img.shields.io/badge/Reddit-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2Flangroid%2Flangroid&title=Harness%20LLMs%20with%20Multi-Agent%20Programming)
-[![Share on Twitter](https://img.shields.io/twitter/url?style=social&url=https://github.com/langroid/langroid)](https://twitter.com/intent/tweet?text=Langroid%20is%20a%20powerful,%20elegant%20new%20framework%20to%20easily%20build%20%23LLM%20applications.%20You%20set%20up%20LLM-powered%20Agents%20with%20vector-stores,%20assign%20tasks,%20and%20have%20them%20collaboratively%20solve%20problems%20via%20message-transformations.%20https://github.com/langroid/langroid)
-[![LinkedIn](https://img.shields.io/badge/linkedin-%230077B5.svg?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/shareArticle?mini=true&url=https://github.com/langroid/langroid&title=Langroid:%20A%20Powerful,%20Elegant%20Framework&summary=Langroid%20is%20a%20powerful,%20elegant%20new%20framework%20to%20easily%20build%20%23LLM%20applications.%20You%20set%20up%20LLM-powered%20Agents%20with%20vector-stores,%20assign%20tasks,%20and%20have%20them%20collaboratively%20solve%20problems%20via%20message-transformations.)
-
-
+[![Static Badge](https://img.shields.io/badge/Documentation-blue?link=https%3A%2F%2Flangroid.github.io%2Flangroid%2F&link=https%3A%2F%2Flangroid.github.io%2Flangroid%2F)](https://langroid.github.io/langroid)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/langroid/langroid/blob/main/examples/langroid_quick_examples.ipynb)
+[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?style=flat&logo=discord&logoColor=white)](https://discord.gg/ZU36McDgDs)
+[![Substack](https://img.shields.io/badge/Substack-%23006f5c.svg?style=flat&logo=substack&logoColor=FF6719)](https://langroid.substack.com/p/langroid-harness-llms-with-multi-agent-programming)
 </div>
 
 <h3 align="center">
@@ -63,11 +50,100 @@ for ideas on what to contribute.
 
 **Questions, Feedback, Ideas? Join us on [Discord](https://discord.gg/ZU36McDgDs)!**
 
+# Quick glimpse of coding with Langroid
+This is just a teaser; there's much more, like function-calling/tools, 
+Multi-Agent Collaboration, Structured Information Extraction, DocChatAgent 
+(RAG), SQLChatAgent, etc. Scroll down or see docs for more.
+
+:fire: Just released! See this [Colab](https://colab.research.google.com/drive/190Tk7t4AdY1P9F_NlZ33-YEoGnHweQQ0) 
+for a walk-through of the new `OpenAIAssistant` class (with near-complete support for the new OpenAI Assistants API) 
+in a multi-agent setting.
+
+
+```python
+from langroid.language_models import  OpenAIGPTConfig, OpenAIChatModel, OpenAIGPT
+from langroid import ChatAgent, ChatAgentConfig, Task
+
+# set up LLM
+llm_cfg = OpenAIGPTConfig( # or OpenAIAssistant to use Assistant API 
+  # any model served via an OpenAI-compatible API
+  chat_model=OpenAIChatModel.GPT4_TURBO, # or, e.g., "local/ollama/mistral"
+)
+# use LLM directly
+mdl = OpenAIGPT(llm_cfg)
+response = mdl.chat("What is the capital of Ontario?", max_tokens=10)
+
+# use LLM in an Agent
+agent_cfg = ChatAgentConfig(llm=llm_cfg)
+agent = ChatAgent(agent_cfg)
+agent.llm_response("What is the capital of China?") 
+response = agent.llm_response("And India?") # maintains conversation state 
+
+# wrap Agent in a Task to run interactive loop with user (or other agents)
+task = Task(agent, name="Bot", system_message="You are a helpful assistant")
+task.run("Hello") # kick off with user saying "Hello"
+
+# 2-Agent chat loop: Teacher Agent asks questions to Student Agent
+teacher_agent = ChatAgent(agent_cfg)
+teacher_task = Task(
+  teacher_agent, name="Teacher",
+  system_message="""
+    Ask your student concise numbers questions, and give feedback. 
+    Start with a question.
+    """
+)
+student_agent = ChatAgent(agent_cfg)
+student_task = Task(
+  student_agent, name="Student",
+  system_message="Concisely answer the teacher's questions.",
+  single_round=True,
+)
+
+teacher_task.add_sub_task(student_task)
+teacher_task.run()
+```
+
 <details>
 <summary> <b>:fire: Updates/Releases</b></summary>
 
+- **Nov 2023:**
+  - **0.1.126:** OpenAIAssistant agent: Caching Support. See [release notes](https://github.com/langroid/langroid/releases/tag/0.1.126).
+  - **0.1.117:** Support for OpenAI Assistant API tools: Function-calling, 
+    Code-intepreter, and Retriever (RAG), file uploads. These work seamlessly 
+    with Langroid's task-orchestration.
+    Until docs are ready, it's best to see these usage examples:
+    
+    - **Tests:**
+      - [test_openai_assistant.py](https://github.com/langroid/langroid/blob/main/tests/main/test_openai_assistant.py)
+      - [test_openai_assistant_async.py](https://github.com/langroid/langroid/blob/main/tests/main/test_openai_assistant_async.py)
+
+    - **Example scripts:**
+      - [The most basic chat app](https://github.com/langroid/langroid/blob/main/examples/basic/oai-asst-chat.py)
+      - [Chat with code interpreter](https://github.com/langroid/langroid/blob/main/examples/basic/oai-code-chat.py)
+      - [Chat with retrieval (RAG)](https://github.com/langroid/langroid/blob/main/examples/docqa/oai-retrieval-assistant.py)
+      - [2-agent RAG chat](https://github.com/langroid/langroid/blob/main/examples/docqa/oai-retrieval-2.py)
+  - **0.1.112:** [`OpenAIAssistant`](https://github.com/langroid/langroid/blob/main/langroid/agent/openai_assistant.py) is a subclass of `ChatAgent` that 
+    leverages the new OpenAI Assistant API. It can be used as a drop-in 
+    replacement for `ChatAgent`, and relies on the Assistant API to
+    maintain conversation state, and leverages persistent threads and 
+    assistants to reconnect to them if needed. Examples: 
+    [`test_openai_assistant.py`](https://github.com/langroid/langroid/blob/main/tests/main/test_openai_assistant.py),
+    [`test_openai_assistant_async.py`](https://github.com/langroid/langroid/blob/main/tests/main/test_openai_assistant_async.py)
+  - **0.1.111:** Support latest OpenAI model: `GPT4_TURBO`
+(see [test_llm.py](tests/main/test_llm.py) for example usage)
+  - **0.1.110:** Upgrade from OpenAI v0.x to v1.1.1 (in preparation for 
+    Assistants API and more); (`litellm` temporarily disabled due to OpenAI 
+    version conflict).
 - **Oct 2023:**
-  - **0.1.102:** `DocChatAgentConfig.n_neighbor_chunks > 0` allows returning context chunks around match. 
+  - **0.1.107:** `DocChatAgent` re-rankers: `rank_with_diversity`, `rank_to_periphery` (lost in middle).
+  - **0.1.102:** `DocChatAgentConfig.n_neighbor_chunks > 0` allows returning context chunks around match.
+  - **0.1.101:** `DocChatAgent` uses `RelevanceExtractorAgent` to have 
+    the LLM extract relevant portions of a chunk using 
+    sentence-numbering, resulting in huge speed up and cost reduction 
+    compared to the naive "sentence-parroting" approach (writing out full 
+    sentences out relevant whole sentences) which `LangChain` uses in their 
+    `LLMChainExtractor`.
+  - **0.1.100:** API update: all of Langroid is accessible with a single import, i.e. `import langroid as lr`. See the [documentation]("https://langroid.github.io/langroid/") for usage.
   - **0.1.99:** Convenience batch functions to run tasks, agent methods on a list of inputs concurrently in async mode. See examples in [test_batch.py](https://github.com/langroid/langroid/blob/main/tests/main/test_batch.py).
   - **0.1.95:** Added support for [Momento Serverless Vector Index](https://docs.momentohq.com/vector-index)
   - **0.1.94:** Added support for [LanceDB](https://lancedb.github.io/lancedb/) vector-store -- allows vector, Full-text, SQL search.
@@ -210,9 +286,11 @@ In the root of the repo, copy the `.env-template` file to a new file `.env`:
 cp .env-template .env
 ```
 Then insert your OpenAI API Key. 
-Your `.env` file should look like this:
+Your `.env` file should look like this (the organization is optional 
+but may be required in some scenarios).
 ```bash
 OPENAI_API_KEY=your-key-here-without-quotes
+OPENAI_ORGANIZATION=optionally-your-organization-id
 ````
 
 Alternatively, you can set this as an environment variable in your shell
@@ -284,11 +362,11 @@ When using Azure OpenAI, additional environment variables are required in the
 This page [Microsoft Azure OpenAI](https://learn.microsoft.com/en-us/azure/ai-services/openai/chatgpt-quickstart?tabs=command-line&pivots=programming-language-python#environment-variables)
 provides more information, and you can set each environment variable as follows:
 
-- `AZURE_API_KEY`, from the value of `API_KEY`
+- `AZURE_OPENAI_API_KEY`, from the value of `API_KEY`
 - `AZURE_OPENAI_API_BASE` from the value of `ENDPOINT`, typically looks like `https://your.domain.azure.com`.
 - For `AZURE_OPENAI_API_VERSION`, you can use the default value in `.env-template`, and latest version can be found [here](https://learn.microsoft.com/en-us/azure/ai-services/openai/whats-new#azure-openai-chat-completion-general-availability-ga)
 - `AZURE_OPENAI_DEPLOYMENT_NAME` is the name of the deployed model, which is defined by the user during the model setup 
-- `AZURE_GPT_MODEL_NAME` GPT-3.5-Turbo or GPT-4 model names that you chose when you setup your Azure OpenAI account.
+- `AZURE_OPENAI_MODEL_NAME` GPT-3.5-Turbo or GPT-4 model names that you chose when you setup your Azure OpenAI account.
 
 </details>
 
@@ -384,10 +462,19 @@ If the model is [supported by `liteLLM`](https://docs.litellm.ai/docs/providers)
 then no need to launch the proxy server.
 Just set the `chat_model` param above to `litellm/[provider]/[model]`, e.g. 
 `litellm/anthropic/claude-instant-1` and use the config object as above.
+Note that to use `litellm` you need to install langroid with the `litellm` extra:
+`poetry install -E litellm` or `pip install langroid[litellm]`.
 For remote models, you will typically need to set API Keys etc as environment variables.
 You can set those based on the LiteLLM docs. 
 If any required environment variables are missing, Langroid gives a helpful error
 message indicating which ones are needed.
+Note that to use `langroid` with `litellm` you need to install the `litellm` 
+extra, i.e. either `pip install langroid[litellm]` in your virtual env,
+or if you are developing within the `langroid` repo, 
+`poetry install -E litellm`.
+```bash
+pip install langroid[litellm]
+```
 </details>
 
 <details>
@@ -484,7 +571,7 @@ Langroid leverages Pydantic to support OpenAI's
 [Function-calling API](https://platform.openai.com/docs/guides/gpt/function-calling)
 as well as its own native tools. The benefits are that you don't have to write
 any JSON to specify the schema, and also if the LLM hallucinates a malformed
-tool syntax, Langroid sends the Pydantic validation error (suitiably sanitized) 
+tool syntax, Langroid sends the Pydantic validation error (suitably sanitized) 
 to the LLM so it can fix it!
 
 Simple example: Say the agent has a secret list of numbers, 

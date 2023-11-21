@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     nofunc: bool = False  # use model without function_call? (i.e. gpt-4)
     chat_model: str = ""  # language model name, e.g. litellm/ollama/llama2
     quiet: bool = False  # quiet mode (i.e. suppress all output)?
+    notebook: bool = False  # running in a notebook?
 
     class Config:
         extra = "forbid"
@@ -72,16 +73,18 @@ def temporary_settings(temp_settings: Settings) -> Iterator[None]:
 
 
 @contextmanager
-def quiet_mode() -> Iterator[None]:
+def quiet_mode(quiet: bool = True) -> Iterator[None]:
     """Temporarily set quiet=True in global settings and restore afterward."""
-    original_quiet = settings.quiet
-
-    set_global(Settings(quiet=True))
+    original_settings = copy.deepcopy(settings)
+    if quiet:
+        temp_settings = original_settings.copy(update={"quiet": True})
+        set_global(temp_settings)
 
     try:
         yield
     finally:
-        settings.quiet = original_quiet
+        if quiet:
+            settings.__dict__.update(original_settings.__dict__)
 
 
 def set_env(settings: BaseSettings) -> None:

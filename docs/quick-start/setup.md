@@ -25,7 +25,7 @@ pip install langroid
 
 ??? note "Optional Installs for using SQL Chat with a PostgreSQL DB"
     If you are using `SQLChatAgent`
-    (e.g. the script [`examples/data-qa/sql-chat/sql_chat.py`](examples/data-qa/sql-chat/sql_chat.py)),
+    (e.g. the script [`examples/data-qa/sql-chat/sql_chat.py`](https://github.com/langroid/langroid/blob/main/examples/data-qa/sql-chat/sql_chat.py),
     with a postgres db, you will need to:
     
     - Install PostgreSQL dev libraries for your platform, e.g.
@@ -101,7 +101,7 @@ to use specific features (as noted below).
   `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` in your `.env` file.
   Full documentation on using this (and other such "stateless" tools) is coming soon, but
   in the meantime take a peek at the test
-  [`tests/main/test_google_search_tool.py`](tests/main/test_google_search_tool.py) to see how to use it.
+  [`tests/main/test_google_search_tool.py`](https://github.com/langroid/langroid/blob/main/tests/main/test_google_search_tool.py) to see how to use it.
 
 
 If you add all of these optional variables, your `.env` file should look like this:
@@ -128,11 +128,11 @@ When using Azure OpenAI, additional environment variables are required in the
 This page [Microsoft Azure OpenAI](https://learn.microsoft.com/en-us/azure/ai-services/openai/chatgpt-quickstart?tabs=command-line&pivots=programming-language-python#environment-variables)
 provides more information, and you can set each environment variable as follows:
 
-- `AZURE_API_KEY`, from the value of `API_KEY`
+- `AZURE_OPENAI_API_KEY`, from the value of `API_KEY`
 - `AZURE_OPENAI_API_BASE` from the value of `ENDPOINT`, typically looks like `https://your.domain.azure.com`.
 - For `AZURE_OPENAI_API_VERSION`, you can use the default value in `.env-template`, and latest version can be found [here](https://learn.microsoft.com/en-us/azure/ai-services/openai/whats-new#azure-openai-chat-completion-general-availability-ga)
 - `AZURE_OPENAI_DEPLOYMENT_NAME` is the name of the deployed model, which is defined by the user during the model setup
-- `AZURE_GPT_MODEL_NAME` GPT-3.5-Turbo or GPT-4 model names that you chose when you setup your Azure OpenAI account.
+- `AZURE_OPENAI_MODEL_NAME` GPT-3.5-Turbo or GPT-4 model names that you chose when you setup your Azure OpenAI account.
 
 
 ## Next steps

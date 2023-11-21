@@ -30,6 +30,7 @@ import typer
 from rich import print
 import os
 
+import langroid.language_models.base
 from langroid.agent.special.doc_chat_agent import (
     DocChatAgent,
     DocChatAgentConfig,
@@ -111,6 +112,10 @@ def chat(config: DocChatAgentConfig) -> None:
     )
     writer_task.add_sub_task(doc_task)
     writer_task.run()
+
+    # show cost summary
+    print("LLM usage, cost summary:")
+    print(str(langroid.language_models.base.LanguageModel.usage_cost_summary()))
 
 
 @app.command()

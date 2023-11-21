@@ -22,14 +22,12 @@ logger = logging.getLogger(__name__)
 class RelevanceExtractorAgentConfig(ChatAgentConfig):
     llm: OpenAIGPTConfig = OpenAIGPTConfig()
     segment_length: int = 1  # number of sentences per segment
-    query: str  # query for relevance extraction
+    query: str = ""  # query for relevance extraction
     system_message = """
     The user will give you a PASSAGE containing segments numbered as  
     <#1#>, <#2#>, <#3#>, etc.,
-    followed by a QUERY. Your task is to extract ALL and ONLY the segment-numbers from 
-    the PASSAGE that are RELEVANT to the QUERY. You must use the `extract_segments` 
-    tool/function to present your answer, by setting the `segment_list` field 
-    to a list of segment numbers or ranges, like "10,12,14-17".
+    followed by a QUERY. Extract ONLY the segment-numbers from 
+    the PASSAGE that are RELEVANT to the QUERY.
     """
 
 
